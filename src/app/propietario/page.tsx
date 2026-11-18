@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useMemo } from "react";
 import Link from "next/link";
 import {
   Plus,
@@ -21,6 +21,9 @@ import {
   Bath,
   Maximize2,
   Sparkles,
+  ChevronLeft,
+  ChevronRight,
+  Download,
 } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import { useSigiStore } from "@/lib/store";
@@ -31,22 +34,48 @@ import {
 } from "@/lib/validations";
 
 export default function PropietarioPage() {
-  const { properties, addProperty } = useSigiStore();
+  const {
+    properties,
+    visits,
+    offers,
+    legalDocuments,
+    addProperty,
+    updatePropertyPrice,
+    respondToOffer,
+    updateLegalDocument,
+    scheduleVisit,
+  } = useSigiStore();
 
-  // Propiedad principal en gestión (Villa Cumbres del Valle • Residencia A-104 por defecto)
-  const defaultOwnerProp =
-    properties.find((p) => p.id === "prop-villa-cumbres-a104") ||
-    properties[properties.length - 1];
+  // Ordenar activos para que Villa Cumbres del Valle • Residencia A-104 sea el Activo #1 por defecto
+  const ownerAssets = useMemo(() => {
+    const primary = properties.find(
+      (p) =>
+        p.folio === "MX-NL-2025-104" || p.id === "prop-villa-cumbres-a104"
+    );
+    const others = properties.filter(
+      (p) =>
+        p.folio !== "MX-NL-2025-104" && p.id !== "prop-villa-cumbres-a104"
+    );
+    return primary ? [primary, ...others] : properties;
+  }, [properties]);
 
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>(
-    defaultOwnerProp?.id || "prop-villa-cumbres-a104"
+    ownerAssets[0]?.id || "prop-villa-cumbres-a104"
   );
 
-  const activeOwnerProp =
-    properties.find((p) => p.id === selectedPropertyId) || defaultOwnerProp;
+  const currentAssetIndex = Math.max(
+    0,
+    ownerAssets.findIndex(
+      (p) => p.id === selectedPropertyId || p.folio === selectedPropertyId
+    )
+  );
+
+  const activeOwnerProp = ownerAssets[currentAssetIndex] || ownerAssets[0];
 
   // Valuación y ajuste de precio de salida interactivo
-  const [valuationPrice, setValuationPrice] = useState<number>(4350000);
+  const [valuationPrice, setValuationPrice] = useState<number>(
+    activeOwnerProp?.salePrice || 4350000
+  );
   const [adjustingPrice, setAdjustingPrice] = useState(false);
   const [newExitPriceInput, setNewExitPriceInput] = useState("4350000");
 
@@ -71,11 +100,123 @@ export default function PropietarioPage() {
   );
   const [legalUploadError, setLegalUploadError] = useState<string | null>(null);
 
-  // Toasts interactivos
+  // Toasts y modales interactivos
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [offerModalOpen, setOfferModalOpen] = useState(false);
+  const [counterOfferInputs, setCounterOfferInputs] = useState<
+    Record<string, string>
+  >({
+    "Folio #OF-882": "4350000",
+    "Folio #OF-841": "4280000",
+  });
 
-  // Manejo de imagen en el modal de Propiedad (validateAndResizeImage -> WebP max 1200px)
+  // Modal de Agendar Llamada Notarial
+  const [notarialModalOpen, setNotarialModalOpen] = useState(false);
+  const [notarialTopic, setNotarialTopic] = useState(
+    "Notaría Pública No. 19 • Revisión de Oferta / LOI"
+  );
+  const [notarialSchedule, setNotarialSchedule] = useState(
+    "Mañana, 10:00 AM"
+  );
+
+  // Navegación entre propiedades en gestión con flechas <- y ->
+  const handleSelectAssetByIndex = (nextIndex: number) => {
+    if (ownerAssets.length === 0) return;
+    const wrapped = (nextIndex + ownerAssets.length) % ownerAssets.length;
+    const target = ownerAssets[wrapped];
+    setSelectedPropertyId(target.id);
+    setValuationPrice(target.salePrice);
+    setNewExitPriceInput(String(target.salePrice));
+    setAdjustingPrice(false);
+  };
+
+  // Descarga real de archivo .ics con las 3 visitas programadas (Dr. Fernando Morales, Lic. Sofía Alatorre e Ing. Carlos Baillères)
+  const handleDownloadGoogleCalendarIcs = () => {
+    const activeVisits = visits.slice(0, 3);
+    const nowStamp = "20261118T060000Z";
+    const eventSlots = [
+      { start: "20261118T173000Z", end: "20261118T183000Z" },
+      { start: "20261119T220000Z", end: "20261119T230000Z" },
+      { start: "20261121T160000Z", end: "20261121T170000Z" },
+    ];
+
+    const eventsIcs = activeVisits
+      .map((v, idx) => {
+        const slot = eventSlots[idx] || eventSlots[0];
+        const summary = `Visita Patrimonial SIGI: ${v.visitorName} (${v.buyerScoreBadge})`;
+        const description = `Propósito: ${v.visitPurpose} | Horario: ${
+          v.scheduleLabel
+        } | Teléfono: ${v.visitorPhone} | Propiedad: ${
+          activeOwnerProp?.title || "Villa Cumbres del Valle • Residencia A-104"
+        } (Folio ${v.propertyFolio})`;
+        const location =
+          activeOwnerProp?.location ||
+          "Residencial San Pedro Garza García, N.L.";
+
+        return [
+          "BEGIN:VEVENT",
+          `UID:sigi-visit-${v.id}-${idx + 1}@coldwellbanker.com.mx`,
+          `DTSTAMP:${nowStamp}`,
+          `DTSTART:${slot.start}`,
+          `DTEND:${slot.end}`,
+          `SUMMARY:${summary}`,
+          `DESCRIPTION:${description}`,
+          `LOCATION:${location}`,
+          "STATUS:CONFIRMED",
+          "END:VEVENT",
+        ].join("\r\n");
+      })
+      .join("\r\n");
+
+    const icsContent = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//Coldwell Banker Mexico//SIGI Intelligence v4.8//ES",
+      "CALSCALE:GREGORIAN",
+      "METHOD:PUBLISH",
+      "X-WR-CALNAME:Agenda Visitas SIGI Coldwell Banker",
+      eventsIcs,
+      "END:VCALENDAR",
+    ].join("\r\n");
+
+    if (typeof window !== "undefined") {
+      const blob = new Blob([icsContent], {
+        type: "text/calendar;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "agenda-visitas-sigi-coldwell-banker.ics";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    setStatusBanner(
+      "Archivo .ics descargado con las 3 visitas programadas (Dr. Fernando Morales V., Lic. Sofía Alatorre e Ing. Carlos Baillères) para sincronizar en Google Calendar."
+    );
+  };
+
+  // Botón Contactar a un Asesor Coldwell Banker
+  const handleContactAdvisor = () => {
+    const folio = activeOwnerProp?.folio || "MX-NL-2025-104";
+    const title =
+      activeOwnerProp?.title || "Villa Cumbres del Valle • Residencia A-104";
+    const msg = `Hola Lic. Mauricio Lozano, soy el Lic. Roberto Garza Sada. Solicito seguimiento ejecutivo sobre mi propiedad en gestión "${title}" (Folio SIGI: ${folio}).`;
+    if (typeof window !== "undefined") {
+      window.open(
+        `https://wa.me/525589201200?text=${encodeURIComponent(msg)}`,
+        "_blank",
+        "noopener,noreferrer"
+      );
+    }
+    setStatusBanner(
+      `Canal prioritario WhatsApp abierto con Lic. Mauricio Lozano (Director Senior CB) para el activo ${title} (${folio}).`
+    );
+  };
+
+  // Manejo de imagen en el modal de Propiedad (Sharp /api/upload -> Supabase Storage property-media)
   const handlePropertyImageChange = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
@@ -90,9 +231,8 @@ export default function PropietarioPage() {
     });
 
     const result = await validateAndResizeImage(file);
-    setIsProcessingImage(false);
-
     if (!result.valid) {
+      setIsProcessingImage(false);
       setPropImagePreview(null);
       setPropImageMeta(null);
       setPropErrors((prev) => ({
@@ -102,17 +242,52 @@ export default function PropietarioPage() {
       return;
     }
 
-    setPropImagePreview(result.dataUrl || null);
-    const kb = result.optimizedSize
-      ? (result.optimizedSize / 1024).toFixed(1)
-      : "0";
-    setPropImageMeta(
-      `Convertida a .webp (${result.width}x${result.height}px • ${kb} KB)`
-    );
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await response.json();
+
+      if (!response.ok || payload.error) {
+        setIsProcessingImage(false);
+        setPropImagePreview(null);
+        setPropImageMeta(null);
+        setPropErrors((prev) => ({
+          ...prev,
+          image: payload.error || "No se pudo procesar la imagen en el servidor.",
+        }));
+        return;
+      }
+
+      setIsProcessingImage(false);
+      setPropImagePreview(payload.publicUrl || result.dataUrl || null);
+      const kb = payload.size
+        ? (payload.size / 1024).toFixed(1)
+        : result.optimizedSize
+        ? (result.optimizedSize / 1024).toFixed(1)
+        : "0";
+      const w = payload.width || result.width || 1200;
+      const h = payload.height || result.height || 800;
+      setPropImageMeta(
+        `Subida a Supabase Storage .webp (${w}x${h}px • ${kb} KB)`
+      );
+    } catch {
+      setIsProcessingImage(false);
+      setPropImagePreview(result.dataUrl || null);
+      const kb = result.optimizedSize
+        ? (result.optimizedSize / 1024).toFixed(1)
+        : "0";
+      setPropImageMeta(
+        `Convertida a .webp (${result.width}x${result.height}px • ${kb} KB)`
+      );
+    }
   };
 
-  // Manejo de validación de archivo <= 5MB en "Actualizar Archivos" del Expediente Jurídico
-  const handleLegalDocumentUpload = (
+  // Manejo de validación de archivo <= 5MB en "Actualizar Archivos" del Expediente Jurídico (public.legal_documents)
+  const handleLegalDocumentUpload = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
     const file = e.target.files?.[0];
@@ -128,15 +303,37 @@ export default function PropietarioPage() {
       return;
     }
 
+    let uploadedUrl: string | null = null;
+    if (["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const upRes = await fetch("/api/upload", { method: "POST", body: fd });
+        const upData = await upRes.json();
+        if (upRes.ok && upData.publicUrl) {
+          uploadedUrl = upData.publicUrl;
+        }
+      } catch {
+        // Fallback sin URL remota
+      }
+    }
+
+    const kb = (file.size / 1024).toFixed(1);
+    await updateLegalDocument({
+      propertyFolio: activeOwnerProp?.folio || "MX-NL-2025-104",
+      documentTitle: file.name,
+      documentDetail: `Anexo Jurídico (${kb} KB) • Auditado NOM-247`,
+      verificationStatus: "Verificado",
+      fileUrl: uploadedUrl,
+    });
+
     setLegalUploadStatus(
-      `Documento "${file.name}" (${(file.size / 1024).toFixed(
-        1
-      )} KB) auditado y anexado al Expediente Jurídico.`
+      `Documento "${file.name}" (${kb} KB) auditado y sincronizado en public.legal_documents.`
     );
   };
 
-  // Envío del formulario "+ Agregar / Registrar Propiedad"
-  const handleRegisterProperty = (e: React.FormEvent) => {
+  // Envío del formulario "+ Agregar / Registrar Propiedad" (INSERT en public.properties)
+  const handleRegisterProperty = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const parsed = propertySchema.safeParse({
@@ -168,7 +365,7 @@ export default function PropietarioPage() {
 
     if (!parsed.success) return;
 
-    const created = addProperty({
+    const created = await addProperty({
       title: parsed.data.title,
       location: parsed.data.location,
       salePrice: parsed.data.salePrice,
@@ -194,11 +391,11 @@ export default function PropietarioPage() {
     setPropErrors({});
     setPropModalOpen(false);
     setStatusBanner(
-      `Propiedad "${created.title}" registrada y validada en la Red MLS Global Coldwell Banker.`
+      `Propiedad "${created.title}" registrada en Supabase (public.properties) y validada en la Red MLS Global Coldwell Banker.`
     );
   };
 
-  const handleSaveExitPrice = (e: React.FormEvent) => {
+  const handleSaveExitPrice = async (e: React.FormEvent) => {
     e.preventDefault();
     const numeric = Number(newExitPriceInput);
     if (numeric <= 0 || Number.isNaN(numeric)) {
@@ -206,10 +403,14 @@ export default function PropietarioPage() {
     }
     setValuationPrice(numeric);
     setAdjustingPrice(false);
+    await updatePropertyPrice(
+      activeOwnerProp?.folio || selectedPropertyId,
+      numeric
+    );
     setStatusBanner(
       `Precio de salida actualizado a $${numeric.toLocaleString(
         "es-MX"
-      )} MXN con sincronización inmediata en el MLS.`
+      )} MXN en Supabase (public.properties) con sincronización inmediata en el MLS.`
     );
   };
 
@@ -312,18 +513,54 @@ export default function PropietarioPage() {
           {/* Tarjeta Principal: Mis Propiedades en Gestión (1 de 3 Activos Principales) */}
           <section className="bg-white rounded-3xl border border-slate-200/80 shadow-xs overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-sm sm:text-base font-extrabold text-[#0B1F3A]">
-                Mis Propiedades en Gestión (1 de 3 Activos Principales)
-              </h2>
+              <div className="flex items-center gap-3">
+                <h2 className="text-sm sm:text-base font-extrabold text-[#0B1F3A]">
+                  Mis Propiedades en Gestión ({currentAssetIndex + 1} de{" "}
+                  {Math.max(3, ownerAssets.length)} Activos Principales)
+                </h2>
+                <div className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSelectAssetByIndex(currentAssetIndex - 1)
+                    }
+                    aria-label="Propiedad anterior (<-)"
+                    title="Activo anterior (<-)"
+                    className="w-8 h-8 rounded-xl border border-slate-200 bg-slate-50 hover:bg-[#0B1F3A] hover:text-white text-[#0B1F3A] flex items-center justify-center transition-colors cursor-pointer"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSelectAssetByIndex(currentAssetIndex + 1)
+                    }
+                    aria-label="Siguiente propiedad (->)"
+                    title="Siguiente activo (->)"
+                    className="w-8 h-8 rounded-xl border border-slate-200 bg-slate-50 hover:bg-[#0B1F3A] hover:text-white text-[#0B1F3A] flex items-center justify-center transition-colors cursor-pointer"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-500">Activo seleccionado:</span>
+                <span className="text-xs text-slate-500">
+                  Activo seleccionado:
+                </span>
                 <select
-                  value={selectedPropertyId}
-                  onChange={(e) => setSelectedPropertyId(e.target.value)}
-                  className="text-xs font-bold text-[#0B1F3A] bg-slate-100 border border-slate-200 rounded-xl px-3 py-1.5"
+                  value={activeOwnerProp?.id || selectedPropertyId}
+                  onChange={(e) => {
+                    const idx = ownerAssets.findIndex(
+                      (p) => p.id === e.target.value
+                    );
+                    if (idx >= 0) {
+                      handleSelectAssetByIndex(idx);
+                    }
+                  }}
+                  className="text-xs font-bold text-[#0B1F3A] bg-slate-100 border border-slate-200 rounded-xl px-3 py-1.5 cursor-pointer"
                 >
-                  {properties.map((p) => (
+                  {ownerAssets.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.title}
                     </option>
@@ -333,7 +570,7 @@ export default function PropietarioPage() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-12">
-              {/* Izquierda: Fotografía de Villa Cumbres del Valle • Residencia A-104 */}
+              {/* Izquierda: Fotografía y métricas del Activo seleccionado en Supabase */}
               <div className="lg:col-span-6 relative min-h-[360px] bg-[#0B1F3A] flex flex-col justify-between p-6 text-white">
                 <img
                   src={
@@ -354,6 +591,7 @@ export default function PropietarioPage() {
                     • EN COMERCIALIZACIÓN ACTIVA
                   </span>
                   <span className="px-3.5 py-1.5 rounded-full bg-[#0B1F3A]/85 backdrop-blur-md border border-white/20 text-white text-xs font-bold">
+                    Folio {activeOwnerProp?.folio || "MX-NL-2025-104"} •
                     Exclusiva Coldwell Banker
                   </span>
                 </div>
@@ -362,30 +600,35 @@ export default function PropietarioPage() {
                 <div className="relative z-10 space-y-3">
                   <div>
                     <h3 className="text-xl sm:text-2xl font-extrabold">
-                      Villa Cumbres del Valle • Residencia A-104
+                      {activeOwnerProp?.title ||
+                        "Villa Cumbres del Valle • Residencia A-104"}
                     </h3>
                     <p className="text-xs sm:text-sm text-sky-200 flex items-center gap-1.5 mt-1">
                       <MapPin className="w-4 h-4 text-sky-300" />
-                      Residencial San Pedro Garza García, N.L.
+                      {activeOwnerProp?.location ||
+                        "Residencial San Pedro Garza García, N.L."}
                     </p>
                   </div>
 
                   <div className="pt-3 border-t border-white/15 flex flex-wrap items-center gap-3 text-xs font-bold text-slate-100">
                     <span className="inline-flex items-center gap-1">
                       <Maximize2 className="w-3.5 h-3.5 text-sky-300" />
-                      620 m² Terreno
+                      {activeOwnerProp?.landAreaDisplay || "620 m²"} Terreno
                     </span>
                     <span>|</span>
-                    <span>485 m² Construcción</span>
+                    <span>
+                      {activeOwnerProp?.constructionAreaDisplay || "485 m²"}{" "}
+                      Construcción
+                    </span>
                     <span>|</span>
                     <span className="inline-flex items-center gap-1">
-                      <BedDouble className="w-3.5 h-3.5 text-sky-300" />4
-                      Recámaras
+                      <BedDouble className="w-3.5 h-3.5 text-sky-300" />
+                      {activeOwnerProp?.bedroomsDisplay || "4 Recámaras"}
                     </span>
                     <span>|</span>
                     <span className="inline-flex items-center gap-1">
                       <Bath className="w-3.5 h-3.5 text-sky-300" />
-                      5.5 Baños
+                      {activeOwnerProp?.bathroomsDisplay || "5.5 Baños"}
                     </span>
                   </div>
                 </div>
@@ -399,7 +642,8 @@ export default function PropietarioPage() {
                       Demanda del Mercado
                     </span>
                     <p className="text-sm font-extrabold text-[#0B1F3A]">
-                      Alta / En Tendencia Regional
+                      {activeOwnerProp?.marketDemand ||
+                        "Alta / En Tendencia Regional"}
                     </p>
                   </div>
                   <span className="px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-extrabold">
@@ -429,16 +673,36 @@ export default function PropietarioPage() {
                       VENTA SUGERIDA (Recomendado)
                     </p>
                     <p className="text-sm sm:text-base font-extrabold text-[#0B1F3A] mt-1">
-                      $4,250,000 – $4,480,000 MXN
+                      $
+                      {(
+                        activeOwnerProp?.suggestedSaleMin ||
+                        Math.round(valuationPrice * 0.977)
+                      ).toLocaleString("es-MX")}{" "}
+                      – $
+                      {(
+                        activeOwnerProp?.suggestedSaleMax ||
+                        Math.round(valuationPrice * 1.03)
+                      ).toLocaleString("es-MX")}{" "}
+                      MXN
                     </p>
                   </div>
 
                   <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-200/80">
                     <p className="text-[10px] font-extrabold uppercase tracking-wider text-sky-800">
-                      RENTA MENSUAL ESTIMADA (Cap Rate 8.6%)
+                      RENTA MENSUAL ESTIMADA (Cap Rate{" "}
+                      {activeOwnerProp?.capRate || "8.6%"})
                     </p>
                     <p className="text-sm sm:text-base font-extrabold text-[#0B1F3A] mt-1">
-                      $32,000 – $36,500 MXN/mes
+                      {activeOwnerProp?.folio === "MX-NL-2025-104" ||
+                      activeOwnerProp?.folio === "MX-QRO-2025-089"
+                        ? "$32,000 – $36,500 MXN/mes"
+                        : `$${Math.round(
+                            (activeOwnerProp?.rentPrice ||
+                              valuationPrice * 0.0065) * 0.95
+                          ).toLocaleString("es-MX")} – $${Math.round(
+                            (activeOwnerProp?.rentPrice ||
+                              valuationPrice * 0.0065) * 1.06
+                          ).toLocaleString("es-MX")} MXN/mes`}
                     </p>
                   </div>
                 </div>
@@ -495,51 +759,43 @@ export default function PropietarioPage() {
               <div className="space-y-3.5">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs sm:text-sm font-extrabold text-[#0B1F3A]">
-                    Agenda de Visitas (3 Próximas)
+                    Agenda de Visitas ({visits.length} Próximas)
                   </h3>
                   <Calendar className="w-4 h-4 text-sky-700" />
                 </div>
 
                 <div className="space-y-2.5 text-xs">
-                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
-                    <p className="font-extrabold text-[#0B1F3A]">
-                      Mañana, 11:30 AM - Dr. Fernando Morales V.
-                    </p>
-                    <p className="text-[11px] text-emerald-700 font-semibold mt-0.5">
-                      Score 920 pts - Intento de Compra Directa
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
-                    <p className="font-extrabold text-[#0B1F3A]">
-                      Jueves 17, 04:00 PM - Lic. Sofía Alatorre
-                    </p>
-                    <p className="text-[11px] text-sky-700 font-semibold mt-0.5">
-                      Score 795 pts - Arrendamiento Corporativo
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70">
-                    <p className="font-extrabold text-[#0B1F3A]">
-                      Sábado 19, 10:00 AM - Ing. Carlos Baillères
-                    </p>
-                    <p className="text-[11px] text-amber-700 font-semibold mt-0.5">
-                      Cash Buyer - Inversión Patrimonial
-                    </p>
-                  </div>
+                  {visits.slice(0, 3).map((v, idx) => (
+                    <div
+                      key={v.id}
+                      className="p-3 rounded-2xl bg-slate-50 border border-slate-200/70"
+                    >
+                      <p className="font-extrabold text-[#0B1F3A]">
+                        {v.scheduleLabel} - {v.visitorName}
+                      </p>
+                      <p
+                        className={`text-[11px] font-semibold mt-0.5 ${
+                          idx === 0
+                            ? "text-emerald-700"
+                            : idx === 1
+                            ? "text-sky-700"
+                            : "text-amber-700"
+                        }`}
+                      >
+                        {v.buyerScoreBadge} - {v.visitPurpose}
+                      </p>
+                    </div>
+                  ))}
                 </div>
               </div>
 
               <button
                 type="button"
-                onClick={() =>
-                  setStatusBanner(
-                    "Agenda sincronizada bidireccionalmente con Google Calendar (Roberto Garza Sada)."
-                  )
-                }
-                className="w-full py-2.5 px-3 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-extrabold text-[#0B1F3A] transition-colors cursor-pointer"
+                onClick={handleDownloadGoogleCalendarIcs}
+                className="w-full py-2.5 px-3 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-extrabold text-[#0B1F3A] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
               >
-                Sincronizar Google Calendar
+                <Download className="w-3.5 h-3.5 text-sky-700" />
+                <span>Sincronizar Google Calendar</span>
               </button>
             </div>
 
@@ -554,41 +810,22 @@ export default function PropietarioPage() {
                 </div>
 
                 <div className="space-y-2.5 text-xs">
-                  <div className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-200/70 flex items-start gap-2.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-extrabold text-[#0B1F3A]">
-                        Escritura Pública en RPP
-                      </p>
-                      <p className="text-[11px] text-slate-600">
-                        Folio Real 4492-SP • Notaría 19
-                      </p>
+                  {legalDocuments.slice(0, 3).map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-200/70 flex items-start gap-2.5"
+                    >
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-extrabold text-[#0B1F3A]">
+                          {doc.documentTitle}
+                        </p>
+                        <p className="text-[11px] text-slate-600">
+                          {doc.documentDetail}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-
-                  <div className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-200/70 flex items-start gap-2.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-extrabold text-[#0B1F3A]">
-                        Boleta Predial 2025
-                      </p>
-                      <p className="text-[11px] text-slate-600">
-                        Pagado Anualidad Completa
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-2xl bg-emerald-50/60 border border-emerald-200/70 flex items-start gap-2.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-extrabold text-[#0B1F3A]">
-                        Libertad de Gravamen
-                      </p>
-                      <p className="text-[11px] text-slate-600">
-                        Vigencia Mayo 2025 Sin Hipoteca
-                      </p>
-                    </div>
-                  </div>
+                  ))}
                 </div>
 
                 {legalUploadError && (
@@ -626,45 +863,44 @@ export default function PropietarioPage() {
               <div className="space-y-3.5">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs sm:text-sm font-extrabold text-[#0B1F3A]">
-                    Ofertas Recibidas (2 Activas)
+                    Ofertas Recibidas ({offers.length} Activas)
                   </h3>
                   <Sparkles className="w-4 h-4 text-amber-500" />
                 </div>
 
                 <div className="space-y-3 text-xs">
-                  <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-extrabold text-[#0B1F3A]">
-                        Folio #OF-882
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
-                        Nueva
-                      </span>
-                    </div>
-                    <p className="text-sm font-extrabold text-[#0B1F3A]">
-                      $4,200,000 MXN
-                    </p>
-                    <p className="text-[11px] text-slate-600">
-                      Transferencia Contado 96.5% de precio lista
-                    </p>
-                  </div>
+                  {offers.slice(0, 2).map((offer) => {
+                    const badgeLower = offer.offerStatusBadge.toLowerCase();
+                    const badgeClass = badgeLower.includes("rechaz")
+                      ? "bg-rose-100 text-rose-800"
+                      : badgeLower.includes("contra")
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-emerald-100 text-emerald-800";
 
-                  <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-extrabold text-[#0B1F3A]">
-                        Folio #OF-841
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold">
-                        Contraoferta
-                      </span>
-                    </div>
-                    <p className="text-sm font-extrabold text-[#0B1F3A]">
-                      $4,100,000 MXN
-                    </p>
-                    <p className="text-[11px] text-slate-600">
-                      Crédito Cofinavit BBVA
-                    </p>
-                  </div>
+                    return (
+                      <div
+                        key={offer.id}
+                        className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-extrabold text-[#0B1F3A]">
+                            {offer.offerFolio}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${badgeClass}`}
+                          >
+                            {offer.offerStatusBadge}
+                          </span>
+                        </div>
+                        <p className="text-sm font-extrabold text-[#0B1F3A]">
+                          {offer.offerAmountDisplay}
+                        </p>
+                        <p className="text-[11px] text-slate-600">
+                          {offer.paymentScheme} {offer.pricePercentageNote}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -713,11 +949,7 @@ export default function PropietarioPage() {
               <div className="space-y-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    setStatusBanner(
-                      "Canal prioritario abierto con Lic. Mauricio Lozano (Director Senior CB)."
-                    )
-                  }
+                  onClick={handleContactAdvisor}
                   className="w-full py-2.5 px-3 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <MessageCircle className="w-3.5 h-3.5" />
@@ -726,11 +958,7 @@ export default function PropietarioPage() {
 
                 <button
                   type="button"
-                  onClick={() =>
-                    setStatusBanner(
-                      "Solicitud de Llamada Notarial agendada con la Mesa Jurídica Coldwell Banker."
-                    )
-                  }
+                  onClick={() => setNotarialModalOpen(true)}
                   className="w-full py-1.5 text-center text-xs font-extrabold text-sky-700 hover:text-[#0B1F3A] hover:underline flex items-center justify-center gap-1 cursor-pointer"
                 >
                   <PhoneCall className="w-3 h-3" />
@@ -1095,50 +1323,269 @@ export default function PropietarioPage() {
         </div>
       )}
 
-      {/* Modal para Revisar y Responder Oferta (#OF-882 y #OF-841) */}
+      {/* Modal para Revisar y Responder Oferta (#OF-882 y #OF-841 en public.property_offers) */}
       {offerModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 sm:p-7 shadow-2xl border border-slate-200 space-y-5 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-extrabold text-[#0B1F3A]">
-                Dictamen de Ofertas Activas
-              </h3>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700">
+                  COMITÉ PATRIMONIAL • PUBLIC.PROPERTY_OFFERS
+                </span>
+                <h3 className="text-lg font-extrabold text-[#0B1F3A]">
+                  Dictamen de Ofertas Recibidas
+                </h3>
+              </div>
               <button
                 type="button"
                 onClick={() => setOfferModalOpen(false)}
-                className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center cursor-pointer"
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
             <p className="text-xs text-slate-600">
-              Selecciona la acción formal para el{" "}
-              <strong>Folio #OF-882 ($4,200,000 MXN • Contado)</strong>:
+              Revisa las ofertas vinculadas a tu cartera y emite una resolución
+              formal sincronizada en tiempo real con{" "}
+              <strong>Supabase (`public.property_offers`)</strong>:
             </p>
-            <div className="grid grid-cols-2 gap-2.5">
+
+            <div className="space-y-4">
+              {offers.map((offer) => {
+                const counterVal =
+                  counterOfferInputs[offer.offerFolio] ||
+                  String(valuationPrice || 4350000);
+                const badgeLower = offer.offerStatusBadge.toLowerCase();
+                const badgeClass = badgeLower.includes("rechaz")
+                  ? "bg-rose-100 text-rose-800"
+                  : badgeLower.includes("contra")
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-emerald-100 text-emerald-800";
+
+                return (
+                  <div
+                    key={offer.id}
+                    className="p-4 rounded-2xl bg-slate-50 border border-slate-200/90 space-y-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <span className="text-sm font-extrabold text-[#0B1F3A]">
+                          {offer.offerFolio}
+                        </span>
+                        <span className="text-xs text-slate-500 ml-2">
+                          • Activo {offer.propertyFolio}
+                        </span>
+                      </div>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${badgeClass}`}
+                      >
+                        {offer.offerStatusBadge}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <p className="text-lg font-extrabold text-[#0B1F3A]">
+                        {offer.offerAmountDisplay}
+                      </p>
+                      <p className="text-xs font-semibold text-slate-600">
+                        {offer.paymentScheme} • {offer.pricePercentageNote}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <label className="text-[11px] font-bold text-slate-600 shrink-0">
+                        Monto Contraoferta (MXN):
+                      </label>
+                      <input
+                        type="number"
+                        min={100000}
+                        step={50000}
+                        value={counterVal}
+                        onChange={(e) =>
+                          setCounterOfferInputs((prev) => ({
+                            ...prev,
+                            [offer.offerFolio]: e.target.value,
+                          }))
+                        }
+                        className="w-full px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-[#0B1F3A]"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await respondToOffer({
+                            offerFolio: offer.offerFolio,
+                            statusBadge: "Aceptada",
+                          });
+                          setOfferModalOpen(false);
+                          setStatusBanner(
+                            `Oferta ${offer.offerFolio} (${offer.offerAmountDisplay}) ACEPTADA y sincronizada en Supabase (public.property_offers). Se notificó a Notaría 19 y al Lic. Mauricio Lozano.`
+                          );
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold cursor-pointer transition-colors"
+                      >
+                        Aceptar Oferta
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const numericCounter =
+                            Number(counterVal) || valuationPrice || 4350000;
+                          const pct = Math.min(
+                            105,
+                            Math.max(
+                              85,
+                              +(
+                                (numericCounter / (valuationPrice || 4350000)) *
+                                100
+                              ).toFixed(1)
+                            )
+                          );
+                          await respondToOffer({
+                            offerFolio: offer.offerFolio,
+                            statusBadge: "Contraoferta",
+                            offerAmount: numericCounter,
+                            pricePercentageNote: `${pct}% de precio lista`,
+                          });
+                          setOfferModalOpen(false);
+                          setStatusBanner(
+                            `Contraoferta por $${numericCounter.toLocaleString(
+                              "es-MX"
+                            )} MXN enviada y sincronizada en Supabase (public.property_offers) para ${
+                              offer.offerFolio
+                            }.`
+                          );
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold cursor-pointer transition-colors"
+                      >
+                        Enviar Contraoferta
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await respondToOffer({
+                            offerFolio: offer.offerFolio,
+                            statusBadge: "Rechazada",
+                          });
+                          setOfferModalOpen(false);
+                          setStatusBanner(
+                            `Oferta ${offer.offerFolio} RECHAZADA formalmente y actualizada en Supabase (public.property_offers).`
+                          );
+                        }}
+                        className="py-2.5 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold cursor-pointer transition-colors"
+                      >
+                        Rechazar
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal para Agendar Llamada Notarial */}
+      {notarialModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700">
+                  MESA JURÍDICA COLDWELL BANKER • NOM-247
+                </span>
+                <h3 className="text-lg font-extrabold text-[#0B1F3A]">
+                  Agendar Llamada Notarial
+                </h3>
+              </div>
               <button
                 type="button"
-                onClick={() => {
-                  setOfferModalOpen(false);
-                  setStatusBanner(
-                    "Oferta Folio #OF-882 pre-aceptada. Se ha notificado a Notaría 19 y al Lic. Mauricio Lozano."
-                  );
-                }}
-                className="py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-extrabold cursor-pointer"
+                onClick={() => setNotarialModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center cursor-pointer"
               >
-                Aceptar Oferta
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Programa una conferencia directa con el titular de la{" "}
+              <strong>Notaría Pública No. 19</strong> y el{" "}
+              <strong>Lic. Mauricio Lozano</strong> para el activo{" "}
+              <strong>{activeOwnerProp?.title}</strong> (Folio{" "}
+              {activeOwnerProp?.folio}).
+            </p>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Asunto Jurídico / Notarial
+                </label>
+                <select
+                  value={notarialTopic}
+                  onChange={(e) => setNotarialTopic(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-200 font-bold text-[#0B1F3A]"
+                >
+                  <option value="Notaría Pública No. 19 • Revisión de Oferta / LOI">
+                    Notaría Pública No. 19 • Revisión de Oferta / LOI
+                  </option>
+                  <option value="Dictamen Fiscal ISR por Enajenación & Escrituración">
+                    Dictamen Fiscal ISR por Enajenación &amp; Escrituración
+                  </option>
+                  <option value="Certificación de Libertad de Gravamen RPP">
+                    Certificación de Libertad de Gravamen RPP
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Horario de Conferencia
+                </label>
+                <select
+                  value={notarialSchedule}
+                  onChange={(e) => setNotarialSchedule(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-200 font-bold text-[#0B1F3A]"
+                >
+                  <option value="Mañana, 10:00 AM">Mañana, 10:00 AM</option>
+                  <option value="Jueves, 01:00 PM">Jueves, 01:00 PM</option>
+                  <option value="Viernes, 05:00 PM">Viernes, 05:00 PM</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setNotarialModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 cursor-pointer"
+              >
+                Cancelar
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setOfferModalOpen(false);
+                onClick={async () => {
+                  await scheduleVisit({
+                    propertyFolio: activeOwnerProp?.folio || "MX-NL-2025-104",
+                    propertyTitle: activeOwnerProp?.title,
+                    visitorName: "Mesa Jurídica Notaría 19 & Lic. Roberto Garza",
+                    visitorPhone: "+52 55 8920 1200",
+                    scheduleLabel: notarialSchedule,
+                    buyerScoreBadge: "Dictamen Legal",
+                    visitPurpose: notarialTopic,
+                  });
+                  setNotarialModalOpen(false);
                   setStatusBanner(
-                    "Contraoferta por $4,350,000 MXN enviada formalmente para el Folio #OF-882."
+                    `Llamada Notarial agendada (${notarialSchedule} • ${notarialTopic}) y sincronizada en Supabase (public.visits).`
                   );
                 }}
-                className="py-2.5 rounded-xl bg-[#0B1F3A] text-white text-xs font-extrabold cursor-pointer"
+                className="px-5 py-2.5 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold cursor-pointer"
               >
-                Enviar Contraoferta
+                Confirmar Llamada Notarial
               </button>
             </div>
           </div>

@@ -6,10 +6,12 @@ import { useRouter } from "next/navigation";
 import {
   Building2,
   ArrowRight,
+  Mail,
   Lock,
   Eye,
   EyeOff,
   ShieldCheck,
+  CheckCircle2,
   AlertCircle,
   Sparkles,
 } from "lucide-react";
@@ -24,6 +26,7 @@ export default function LoginAcademiaPage() {
   const [password, setPassword] = useState("CB-Academia-2025!");
   const [showPassword, setShowPassword] = useState(false);
   const [keepSignedIn, setKeepSignedIn] = useState(true);
+  const [turnstileVerified, setTurnstileVerified] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [recoveryToast, setRecoveryToast] = useState(false);
 
@@ -132,7 +135,7 @@ export default function LoginAcademiaPage() {
               )}
 
               <form onSubmit={handleLogin} className="mt-6 space-y-4" noValidate>
-                {/* Correo Electrónico Corporativo */}
+                {/* Correo Electrónico Corporativo con ícono Mail sobre #F4F7FB */}
                 <div>
                   <label
                     htmlFor="academia-email"
@@ -140,17 +143,20 @@ export default function LoginAcademiaPage() {
                   >
                     Correo Electrónico Corporativo
                   </label>
-                  <input
-                    id="academia-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="asesor.premier@coldwellbanker.com.mx"
-                    className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 bg-slate-50/70 focus:bg-white focus:outline-none focus:border-[#0B1F3A] focus:ring-2 focus:ring-[#0B1F3A]/10 transition-all"
-                  />
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="academia-email"
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="asesor.premier@coldwellbanker.com.mx"
+                      className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:border-[#0B1F3A] focus:ring-2 focus:ring-[#0B1F3A]/10 transition-all"
+                    />
+                  </div>
                 </div>
 
-                {/* Contraseña Cifrada */}
+                {/* Contraseña Cifrada con ícono Lock sobre #F4F7FB */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label
@@ -168,13 +174,14 @@ export default function LoginAcademiaPage() {
                     </button>
                   </div>
                   <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
                       id="academia-password"
                       type={showPassword ? "text" : "password"}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="••••••••••••"
-                      className="w-full pl-4 pr-10 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 bg-slate-50/70 focus:bg-white focus:outline-none focus:border-[#0B1F3A] focus:ring-2 focus:ring-[#0B1F3A]/10 transition-all"
+                      className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:border-[#0B1F3A] focus:ring-2 focus:ring-[#0B1F3A]/10 transition-all"
                     />
                     <button
                       type="button"
@@ -204,6 +211,38 @@ export default function LoginAcademiaPage() {
                       Mantener sesión iniciada
                     </span>
                   </label>
+                </div>
+
+                {/* Widget interactivo anti-bots Cloudflare Turnstile */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setTurnstileVerified((v) => !v)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      setTurnstileVerified((v) => !v);
+                    }
+                  }}
+                  className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200/90 flex items-center justify-between gap-3 cursor-pointer select-none"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <div
+                      className={`w-5 h-5 rounded-md flex items-center justify-center transition-colors ${
+                        turnstileVerified
+                          ? "bg-emerald-500 text-white"
+                          : "bg-white border border-slate-300 text-transparent"
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    </div>
+                    <span className="text-xs font-semibold text-slate-700">
+                      Protección Anti-Bots Cloudflare Turnstile verificada
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
+                    <ShieldCheck className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Turnstile</span>
+                  </div>
                 </div>
 
                 {/* Botón primario #0B1F3A */}

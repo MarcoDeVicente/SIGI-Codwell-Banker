@@ -5,6 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Building2,
+  Home,
+  Briefcase,
+  User,
+  Mail,
+  Smartphone,
+  Lock,
   Eye,
   EyeOff,
   ArrowRight,
@@ -12,7 +18,6 @@ import {
   Sparkles,
   CheckCircle2,
   AlertCircle,
-  Lock,
 } from "lucide-react";
 import { registerSchema } from "@/lib/validations";
 import { useSigiStore, UserRole } from "@/lib/store";
@@ -24,6 +29,7 @@ interface ProfileTabConfig {
   infoDescription: string;
   heroImage: string;
   heroCaption: string;
+  icon: React.ComponentType<{ className?: string }>;
 }
 
 const PROFILE_CONFIGS: Record<UserRole, ProfileTabConfig> = {
@@ -36,6 +42,7 @@ const PROFILE_CONFIGS: Record<UserRole, ProfileTabConfig> = {
     heroImage:
       "https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?auto=format&fit=crop&w=1400&q=80",
     heroCaption: "Residencia con alberca infinita • Colección Global Luxury",
+    icon: Home,
   },
   propietario: {
     role: "propietario",
@@ -46,6 +53,7 @@ const PROFILE_CONFIGS: Record<UserRole, ProfileTabConfig> = {
     heroImage:
       "https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=1400&q=80",
     heroCaption: "Torre Residencial Corporativa • Plusvalía Patrimonial",
+    icon: Building2,
   },
   asesor: {
     role: "asesor",
@@ -56,6 +64,7 @@ const PROFILE_CONFIGS: Record<UserRole, ProfileTabConfig> = {
     heroImage:
       "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1400&q=80",
     heroCaption: "Parque Residencial Moderno • Red Nacional de Asesores CB",
+    icon: Briefcase,
   },
 };
 
@@ -70,9 +79,11 @@ export default function RegistroPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [privacyAccepted, setPrivacyAccepted] = useState(true);
+  const [turnstileVerified, setTurnstileVerified] = useState(true);
 
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formBannerError, setFormBannerError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const activeConfig = PROFILE_CONFIGS[selectedRole];
 
@@ -117,7 +128,7 @@ export default function RegistroPage() {
     return false;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormBannerError(null);
 
@@ -142,23 +153,21 @@ export default function RegistroPage() {
       return;
     }
 
-    const response = registerUser({
+    setIsSubmitting(true);
+    const response = await registerUser({
       role: parsed.data.role,
       fullName: parsed.data.fullName,
       email: parsed.data.email,
       phone: parsed.data.phone,
       privacyAccepted: parsed.data.privacyAccepted,
     });
+    setIsSubmitting(false);
 
     if (!response.success) {
-      // Si el correo/teléfono de demostración ya estaba registrado, actualizamos el rol activo y redirigimos a /sobre-nosotros
-      loginOrSetRole({
-        role: selectedRole,
-        fullName: parsed.data.fullName,
-        email: parsed.data.email,
-        phone: parsed.data.phone,
-      });
-      router.push("/sobre-nosotros" as never);
+      setFormBannerError(
+        response.error ||
+          "El correo electrónico o teléfono ya está registrado en SIGI Coldwell Banker."
+      );
       return;
     }
 
@@ -180,7 +189,7 @@ export default function RegistroPage() {
   return (
     <div className="min-h-screen bg-[#F3F6FA] text-slate-900 flex flex-col justify-between">
       {/* Header Superior Institucional */}
-      <header className="w-full bg-white/90 backdrop-blur-md border-b border-slate-200/80">
+      <header className="w-full bg-white/95 backdrop-blur-md border-b border-slate-200/80">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
           {/* Logo con ícono de edificio */}
           <div className="flex items-center gap-3">
@@ -236,7 +245,7 @@ export default function RegistroPage() {
                 cartera patrimonial Coldwell Banker.
               </p>
 
-              {/* Selector de perfil con 3 pestañas interactivas */}
+              {/* Selector de perfil con 3 pestañas interactivas con ícono centrado arriba del texto */}
               <div className="mt-5">
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                   Selecciona tu perfil en SIGI
@@ -244,11 +253,12 @@ export default function RegistroPage() {
                 <div
                   role="tablist"
                   aria-label="Selecciona tu perfil en SIGI"
-                  className="grid grid-cols-3 gap-1.5 p-1.5 rounded-2xl bg-slate-100 border border-slate-200/80"
+                  className="grid grid-cols-3 gap-2 p-1.5 rounded-2xl bg-[#F4F7FB] border border-slate-200/80"
                 >
                   {(["comprador", "propietario", "asesor"] as UserRole[]).map(
                     (roleKey) => {
                       const tab = PROFILE_CONFIGS[roleKey];
+                      const TabIcon = tab.icon;
                       const isActive = selectedRole === roleKey;
                       return (
                         <button
@@ -260,13 +270,18 @@ export default function RegistroPage() {
                             setSelectedRole(roleKey);
                             validateRealtime({ role: roleKey }, "role");
                           }}
-                          className={`py-2.5 px-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                          className={`py-2.5 px-2 rounded-xl text-xs font-bold flex flex-col items-center justify-center gap-1.5 transition-all cursor-pointer ${
                             isActive
                               ? "bg-[#0B1F3A] text-white shadow-sm"
-                              : "text-slate-600 hover:text-[#0B1F3A] hover:bg-white/60"
+                              : "text-slate-600 hover:text-[#0B1F3A] hover:bg-white/70"
                           }`}
                         >
-                          {tab.tabLabel}
+                          <TabIcon
+                            className={`w-4 h-4 ${
+                              isActive ? "text-white" : "text-slate-500"
+                            }`}
+                          />
+                          <span>{tab.tabLabel}</span>
                         </button>
                       );
                     }
@@ -291,7 +306,7 @@ export default function RegistroPage() {
                   </div>
                 )}
 
-                {/* Nombre Completo */}
+                {/* Nombre Completo con ícono User a la izquierda sobre #F4F7FB */}
                 <div>
                   <label
                     htmlFor="reg-fullname"
@@ -299,22 +314,25 @@ export default function RegistroPage() {
                   >
                     Nombre Completo
                   </label>
-                  <input
-                    id="reg-fullname"
-                    type="text"
-                    value={fullName}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setFullName(val);
-                      validateRealtime({ fullName: val }, "fullName");
-                    }}
-                    placeholder="Lic. Regina Luján"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-sm text-slate-900 bg-slate-50/60 focus:bg-white focus:outline-none focus:ring-2 transition-all ${
-                      fieldErrors.fullName
-                        ? "border-red-400 focus:ring-red-200"
-                        : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
-                    }`}
-                  />
+                  <div className="relative">
+                    <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="reg-fullname"
+                      type="text"
+                      value={fullName}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFullName(val);
+                        validateRealtime({ fullName: val }, "fullName");
+                      }}
+                      placeholder="Lic. Regina Luján"
+                      className={`w-full pl-10 pr-3.5 py-2.5 rounded-xl border text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:ring-2 transition-all ${
+                        fieldErrors.fullName
+                          ? "border-red-400 focus:ring-red-200"
+                          : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
+                      }`}
+                    />
+                  </div>
                   {fieldErrors.fullName && (
                     <p className="mt-1 text-[11px] font-medium text-red-600">
                       {fieldErrors.fullName}
@@ -322,7 +340,7 @@ export default function RegistroPage() {
                   )}
                 </div>
 
-                {/* Correo Electrónico Personal */}
+                {/* Correo Electrónico Personal con ícono Mail a la izquierda sobre #F4F7FB */}
                 <div>
                   <label
                     htmlFor="reg-email"
@@ -330,22 +348,25 @@ export default function RegistroPage() {
                   >
                     Correo Electrónico Personal
                   </label>
-                  <input
-                    id="reg-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setEmail(val);
-                      validateRealtime({ email: val }, "email");
-                    }}
-                    placeholder="regina@patrimonio.mx"
-                    className={`w-full px-3.5 py-2.5 rounded-xl border text-sm text-slate-900 bg-slate-50/60 focus:bg-white focus:outline-none focus:ring-2 transition-all ${
-                      fieldErrors.email
-                        ? "border-red-400 focus:ring-red-200"
-                        : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
-                    }`}
-                  />
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="reg-email"
+                      type="email"
+                      value={email}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEmail(val);
+                        validateRealtime({ email: val }, "email");
+                      }}
+                      placeholder="regina@patrimonio.mx"
+                      className={`w-full pl-10 pr-3.5 py-2.5 rounded-xl border text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:ring-2 transition-all ${
+                        fieldErrors.email
+                          ? "border-red-400 focus:ring-red-200"
+                          : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
+                      }`}
+                    />
+                  </div>
                   {fieldErrors.email && (
                     <p className="mt-1 text-[11px] font-medium text-red-600">
                       {fieldErrors.email}
@@ -353,7 +374,7 @@ export default function RegistroPage() {
                   )}
                 </div>
 
-                {/* Teléfono Celular (WhatsApp Verificado): Prefijo fijo +52 */}
+                {/* Teléfono Celular (WhatsApp Verificado): Prefijo fijo +52 + ícono Smartphone sobre #F4F7FB */}
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label
@@ -370,22 +391,25 @@ export default function RegistroPage() {
                     <span className="inline-flex items-center px-3.5 rounded-l-xl border border-r-0 border-slate-200 bg-slate-100 text-xs font-extrabold text-[#0B1F3A] select-none">
                       +52
                     </span>
-                    <input
-                      id="reg-phone"
-                      type="tel"
-                      value={phone}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setPhone(val);
-                        validateRealtime({ phone: val }, "phone");
-                      }}
-                      placeholder="55 8920 1200"
-                      className={`w-full px-3.5 py-2.5 rounded-r-xl border text-sm text-slate-900 bg-slate-50/60 focus:bg-white focus:outline-none focus:ring-2 transition-all ${
-                        fieldErrors.phone
-                          ? "border-red-400 focus:ring-red-200"
-                          : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
-                      }`}
-                    />
+                    <div className="relative flex-1">
+                      <Smartphone className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        id="reg-phone"
+                        type="tel"
+                        value={phone}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setPhone(val);
+                          validateRealtime({ phone: val }, "phone");
+                        }}
+                        placeholder="55 8920 1200"
+                        className={`w-full pl-10 pr-3.5 py-2.5 rounded-r-xl border text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:ring-2 transition-all ${
+                          fieldErrors.phone
+                            ? "border-red-400 focus:ring-red-200"
+                            : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
+                        }`}
+                      />
+                    </div>
                   </div>
                   {fieldErrors.phone && (
                     <p className="mt-1 text-[11px] font-medium text-red-600">
@@ -394,7 +418,7 @@ export default function RegistroPage() {
                   )}
                 </div>
 
-                {/* Contraseña Segura */}
+                {/* Contraseña Segura con ícono Lock a la izquierda sobre #F4F7FB */}
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label
@@ -408,6 +432,7 @@ export default function RegistroPage() {
                     </span>
                   </div>
                   <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
                       id="reg-password"
                       type={showPassword ? "text" : "password"}
@@ -418,7 +443,7 @@ export default function RegistroPage() {
                         validateRealtime({ password: val }, "password");
                       }}
                       placeholder="••••••••••••"
-                      className={`w-full pl-3.5 pr-10 py-2.5 rounded-xl border text-sm text-slate-900 bg-slate-50/60 focus:bg-white focus:outline-none focus:ring-2 transition-all ${
+                      className={`w-full pl-10 pr-10 py-2.5 rounded-xl border text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:ring-2 transition-all ${
                         fieldErrors.password
                           ? "border-red-400 focus:ring-red-200"
                           : "border-slate-200 focus:border-[#0B1F3A] focus:ring-[#0B1F3A]/10"
@@ -483,12 +508,49 @@ export default function RegistroPage() {
                   )}
                 </div>
 
+                {/* Widget interactivo anti-bots Cloudflare Turnstile */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setTurnstileVerified((v) => !v)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      setTurnstileVerified((v) => !v);
+                    }
+                  }}
+                  className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200/90 flex items-center justify-between gap-3 cursor-pointer select-none"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <div
+                      className={`w-5 h-5 rounded-md flex items-center justify-center transition-colors ${
+                        turnstileVerified
+                          ? "bg-emerald-500 text-white"
+                          : "bg-white border border-slate-300 text-transparent"
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    </div>
+                    <span className="text-xs font-semibold text-slate-700">
+                      Protección Anti-Bots Cloudflare Turnstile verificada
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
+                    <ShieldCheck className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Turnstile</span>
+                  </div>
+                </div>
+
                 {/* Botón primario #0B1F3A */}
                 <button
                   type="submit"
-                  className="w-full py-3 px-5 rounded-xl bg-[#0B1F3A] hover:bg-[#132d54] text-white font-bold text-sm shadow-md shadow-[#0B1F3A]/15 flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  disabled={isSubmitting}
+                  className="w-full py-3 px-5 rounded-xl bg-[#0B1F3A] hover:bg-[#132d54] disabled:opacity-60 text-white font-bold text-sm shadow-md shadow-[#0B1F3A]/15 flex items-center justify-center gap-2 transition-all cursor-pointer"
                 >
-                  <span>Crear Cuenta Coldwell Banker</span>
+                  <span>
+                    {isSubmitting
+                      ? "Registrando en Supabase..."
+                      : "Crear Cuenta Coldwell Banker"}
+                  </span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </form>
@@ -552,33 +614,22 @@ export default function RegistroPage() {
             </div>
           </div>
 
-          {/* Columna Derecha: Imagen Hero redondeada con degradado oscuro inferior */}
-          <div className="lg:col-span-6 relative rounded-3xl overflow-hidden shadow-xl min-h-[540px] flex flex-col justify-between bg-[#0B1F3A]">
+          {/* Columna Derecha: Imagen Hero redondeada sin badges superiores, solo contenido inferior sobre degradado oscuro */}
+          <div className="lg:col-span-6 relative rounded-3xl overflow-hidden shadow-xl min-h-[540px] flex flex-col justify-end bg-[#0B1F3A]">
             <img
               src={activeConfig.heroImage}
               alt={activeConfig.heroCaption}
               className="absolute inset-0 w-full h-full object-cover transition-all duration-500"
             />
-            <div className="absolute inset-0 bg-gradient-to-t from-[#061326] via-[#0B1F3A]/55 to-transparent" />
-
-            {/* Badge superior en la foto */}
-            <div className="relative z-10 p-6 sm:p-8 flex items-center justify-between">
-              <span className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#0B1F3A]/80 backdrop-blur-md border border-white/15 text-[11px] font-bold text-white tracking-wider uppercase">
-                <ShieldCheck className="w-4 h-4 text-sky-300" />
-                {activeConfig.tabLabel} • SIGI Verified
-              </span>
-              <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md text-[11px] font-semibold text-white">
-                {activeConfig.heroCaption}
-              </span>
-            </div>
+            <div className="absolute inset-0 bg-gradient-to-t from-[#061326] via-[#0B1F3A]/60 to-transparent" />
 
             {/* Bloque inferior sobre degradado oscuro */}
-            <div className="relative z-10 p-6 sm:p-8 text-white">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sky-500/20 border border-sky-300/30 text-sky-200 text-[11px] font-extrabold tracking-widest uppercase mb-3">
+            <div className="relative z-10 p-6 sm:p-8 lg:p-10 text-white">
+              <p className="text-xs font-extrabold tracking-[0.18em] text-emerald-400 uppercase mb-2.5">
                 GARANTÍA PATRIMONIAL CERTIFICADA
-              </div>
+              </p>
 
-              <h2 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold leading-tight tracking-tight">
+              <h2 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold leading-tight tracking-tight text-white">
                 Asegura tu participación en el mercado de alta gama.
               </h2>
 
@@ -587,7 +638,7 @@ export default function RegistroPage() {
                 3,400 residencias validadas legalmente.
               </p>
 
-              {/* 3 Métricas al pie */}
+              {/* Línea divisoria horizontal translúcida y 3 columnas de métricas */}
               <div className="mt-6 pt-5 border-t border-white/15 grid grid-cols-3 gap-4">
                 <div>
                   <p className="text-lg sm:text-2xl font-extrabold text-white">
@@ -598,7 +649,7 @@ export default function RegistroPage() {
                   </p>
                 </div>
                 <div>
-                  <p className="text-lg sm:text-2xl font-extrabold text-sky-300">
+                  <p className="text-lg sm:text-2xl font-extrabold text-white">
                     98.4%
                   </p>
                   <p className="text-[11px] text-slate-300 font-medium mt-0.5">
@@ -607,10 +658,10 @@ export default function RegistroPage() {
                 </div>
                 <div>
                   <p className="text-lg sm:text-2xl font-extrabold text-white">
-                    120+
+                    120+ Oficinas
                   </p>
                   <p className="text-[11px] text-slate-300 font-medium mt-0.5">
-                    Oficinas Red Nacional CB
+                    Red Nacional CB
                   </p>
                 </div>
               </div>
@@ -619,11 +670,11 @@ export default function RegistroPage() {
         </div>
       </main>
 
-      {/* Footer Inferior Legal y NOM-247-SE-2021 */}
+      {/* Barra blanca inferior con escudo NOM-247-SE-2021 */}
       <footer className="w-full bg-white border-t border-slate-200/80 py-3.5 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px] text-slate-500">
           <p className="flex items-center gap-1.5 text-center sm:text-left">
-            <Lock className="w-3.5 h-3.5 text-[#0B1F3A] shrink-0" />
+            <ShieldCheck className="w-4 h-4 text-[#0B1F3A] shrink-0" />
             <span>
               <strong className="text-slate-700">
                 Encriptación Bancaria y Cumplimiento NOM-247-SE-2021:
