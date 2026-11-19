@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { INITIAL_PROPERTIES, PropertyItem } from "@/lib/store";
+import {
+  INITIAL_PROPERTIES,
+  PropertyItem,
+  doesLocationMatchCity,
+  isLegacySeedLead,
+} from "@/lib/store";
 
 export interface AiCriterionBreakdown {
   label:
@@ -399,15 +404,36 @@ async function fetchPropertiesCatalog(
   return baseList;
 }
 
+interface RawLeadCandidate {
+  id?: string;
+  fullName?: string;
+  full_name?: string;
+  email?: string;
+  role?: string;
+  lead_category?: string;
+  city?: string;
+  interestProperty?: string;
+  interest_property?: string;
+  budgetDisplay?: string;
+  budget_display?: string;
+  advisorEmail?: string;
+  advisor_email?: string;
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as {
       budget?: number | string;
       zone?: string;
+      city?: string;
+      advisorCity?: string;
+      advisorEmail?: string;
+      strictCityMatch?: boolean;
       typology?: string;
       mode?: string;
       persist?: boolean;
       properties?: RawPropertyRecord[];
+      leads?: RawLeadCandidate[];
     };
 
     const rawBudget = Number(body.budget ?? 18.5);
@@ -418,7 +444,11 @@ export async function POST(request: Request) {
           : rawBudget
         : 18_500_000;
 
-    const zone = String(body.zone || "Juriquilla, Querétaro").trim();
+    const advisorCity = String(body.advisorCity || body.city || "").trim();
+    const strictCityMatch = Boolean(body.strictCityMatch || advisorCity);
+    const zone = String(
+      body.zone || advisorCity || "Juriquilla, Querétaro"
+    ).trim();
     const typology = String(body.typology || "Residencial / Villa").trim();
     const modeNormalized: "Comprar" | "Rentar" =
       String(body.mode || "Comprar")
@@ -427,7 +457,18 @@ export async function POST(request: Request) {
         ? "Rentar"
         : "Comprar";
 
-    const catalog = await fetchPropertiesCatalog(body.properties);
+    const fullCatalog = await fetchPropertiesCatalog(body.properties);
+
+    // Emparejamiento estricto por ciudad cuando se solicita desde el Dashboard del Asesor
+    const catalog =
+      strictCityMatch && advisorCity
+        ? fullCatalog.filter((prop) =>
+            doesLocationMatchCity(
+              `${prop.zone} ${prop.location} ${prop.title}`,
+              advisorCity
+            )
+          )
+        : fullCatalog;
 
     const scored = catalog.map((prop) =>
       evaluatePropertyMatch(prop, {
@@ -448,8 +489,66 @@ export async function POST(request: Request) {
       return aDist - bDist;
     });
 
+    // Cruzar y emparejar únicamente prospectos y propiedades cuya ciudad coincida con la ciudad real del asesor
+    const matchedLeadPairs: Array<{
+      leadId: string;
+      leadName: string;
+      leadEmail: string;
+      assignedProperty: string;
+      propertyFolio: string;
+      city: string;
+      aiScore: number;
+    }> = [];
+
+    if (strictCityMatch && advisorCity && sorted.length > 0) {
+      const advisorEmailClean = String(body.advisorEmail || "")
+        .trim()
+        .toLowerCase();
+      const sourceLeads: RawLeadCandidate[] = Array.isArray(body.leads)
+        ? body.leads
+        : [];
+
+      const cityLeads = sourceLeads.filter((l) => {
+        const fullName = String(l.fullName || l.full_name || "");
+        const email = String(l.email || "").toLowerCase();
+        const id = String(l.id || "");
+        if (isLegacySeedLead({ id, email, fullName })) return false;
+
+        const leadAdv = String(
+          l.advisorEmail || l.advisor_email || ""
+        ).toLowerCase();
+        if (advisorEmailClean && leadAdv && leadAdv !== advisorEmailClean) {
+          return false;
+        }
+
+        const leadCityText = `${l.city || ""} ${
+          l.interestProperty || l.interest_property || ""
+        }`.trim();
+        return l.city
+          ? doesLocationMatchCity(l.city, advisorCity)
+          : doesLocationMatchCity(leadCityText || advisorCity, advisorCity);
+      });
+
+      cityLeads.forEach((lead, idx) => {
+        const bestProp = sorted[idx % sorted.length] || sorted[0];
+        if (!bestProp) return;
+        const leadName = String(
+          lead.fullName || lead.full_name || "Prospecto SIGI"
+        );
+        matchedLeadPairs.push({
+          leadId: String(lead.id || `lead-${idx}`),
+          leadName,
+          leadEmail: String(lead.email || "").toLowerCase(),
+          assignedProperty: `${bestProp.title} (${bestProp.folio})`,
+          propertyFolio: bestProp.folio,
+          city: bestProp.zone || bestProp.location || advisorCity,
+          aiScore: bestProp.ai_match_score,
+        });
+      });
+    }
+
     // Persistir los scores actualizados en public.properties cuando se solicita o si Supabase está activo
-    if (isSupabaseConfigured && body.persist !== false) {
+    if (isSupabaseConfigured && body.persist !== false && sorted.length > 0) {
       await Promise.allSettled(
         sorted.map((item) =>
           supabase
@@ -462,14 +561,19 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       engine: "SIGI Match v4.8",
+      advisorCity: advisorCity || null,
+      strictCityMatch,
       filters: {
         budget: rawBudget,
         budgetMXN,
         zone,
+        city: advisorCity || null,
         typology,
         mode: modeNormalized,
       },
       totalMatched: sorted.length,
+      totalLeadMatches: matchedLeadPairs.length,
+      matchedLeadPairs,
       topMatch: sorted[0] || null,
       properties: sorted,
     });
@@ -491,7 +595,13 @@ export async function GET(request: Request) {
         ? budgetParam * 1_000_000
         : budgetParam
       : 18_500_000;
-  const zone = searchParams.get("zone") || "Juriquilla, Querétaro";
+  const advisorCity = (
+    searchParams.get("city") ||
+    searchParams.get("advisorCity") ||
+    ""
+  ).trim();
+  const zone =
+    searchParams.get("zone") || advisorCity || "Juriquilla, Querétaro";
   const typology = searchParams.get("typology") || "Residencial / Villa";
   const modeNormalized: "Comprar" | "Rentar" = (
     searchParams.get("mode") || "Comprar"
@@ -501,7 +611,16 @@ export async function GET(request: Request) {
     ? "Rentar"
     : "Comprar";
 
-  const catalog = await fetchPropertiesCatalog();
+  const fullCatalog = await fetchPropertiesCatalog();
+  const catalog = advisorCity
+    ? fullCatalog.filter((prop) =>
+        doesLocationMatchCity(
+          `${prop.zone} ${prop.location} ${prop.title}`,
+          advisorCity
+        )
+      )
+    : fullCatalog;
+
   const sorted = catalog
     .map((prop) =>
       evaluatePropertyMatch(prop, {
@@ -515,10 +634,13 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     engine: "SIGI Match v4.8",
+    advisorCity: advisorCity || null,
+    strictCityMatch: Boolean(advisorCity),
     filters: {
       budget: budgetParam,
       budgetMXN,
       zone,
+      city: advisorCity || null,
       typology,
       mode: modeNormalized,
     },

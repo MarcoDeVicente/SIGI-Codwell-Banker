@@ -17,18 +17,23 @@ import {
 } from "lucide-react";
 import { containsMaliciousPayload } from "@/lib/validations";
 import { useSigiStore } from "@/lib/store";
+import SocialAuthModal, { SocialProvider } from "@/components/SocialAuthModal";
+
+const EXAMPLE_ACADEMIA_EMAIL = "asesor.premier@coldwellbanker.com.mx";
+const EXAMPLE_ACADEMIA_PASSWORD = "CB-Academia-2025!";
 
 export default function LoginAcademiaPage() {
   const router = useRouter();
   const { loginOrSetRole } = useSigiStore();
 
-  const [email, setEmail] = useState("asesor.premier@coldwellbanker.com.mx");
-  const [password, setPassword] = useState("CB-Academia-2025!");
+  const [email, setEmail] = useState(EXAMPLE_ACADEMIA_EMAIL);
+  const [password, setPassword] = useState(EXAMPLE_ACADEMIA_PASSWORD);
   const [showPassword, setShowPassword] = useState(false);
   const [keepSignedIn, setKeepSignedIn] = useState(true);
   const [turnstileVerified, setTurnstileVerified] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [recoveryToast, setRecoveryToast] = useState(false);
+  const [ssoProvider, setSsoProvider] = useState<SocialProvider | null>(null);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,17 +63,11 @@ export default function LoginAcademiaPage() {
       phone: "5541908200",
     });
 
-    router.push("/sobre-nosotros" as never);
+    router.push("/asesor" as never);
   };
 
-  const handleSSO = (provider: "Google" | "Apple" | "LinkedIn") => {
-    loginOrSetRole({
-      role: "asesor",
-      fullName: `Agente Academia (${provider})`,
-      email: email.trim() || "asesor.premier@coldwellbanker.com.mx",
-      phone: "5541908200",
-    });
-    router.push("/sobre-nosotros" as never);
+  const handleSSO = (provider: SocialProvider) => {
+    setSsoProvider(provider);
   };
 
   return (
@@ -149,6 +148,11 @@ export default function LoginAcademiaPage() {
                       id="academia-email"
                       type="email"
                       value={email}
+                      onFocus={() => {
+                        if (email === EXAMPLE_ACADEMIA_EMAIL) {
+                          setEmail("");
+                        }
+                      }}
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder="asesor.premier@coldwellbanker.com.mx"
                       className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:border-[#0B1F3A] focus:ring-2 focus:ring-[#0B1F3A]/10 transition-all"
@@ -179,6 +183,11 @@ export default function LoginAcademiaPage() {
                       id="academia-password"
                       type={showPassword ? "text" : "password"}
                       value={password}
+                      onFocus={() => {
+                        if (password === EXAMPLE_ACADEMIA_PASSWORD) {
+                          setPassword("");
+                        }
+                      }}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="••••••••••••"
                       className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 bg-[#F4F7FB] focus:bg-white focus:outline-none focus:border-[#0B1F3A] focus:ring-2 focus:ring-[#0B1F3A]/10 transition-all"
@@ -379,6 +388,13 @@ export default function LoginAcademiaPage() {
           </span>
         </div>
       </footer>
+      <SocialAuthModal
+        isOpen={ssoProvider !== null}
+        provider={ssoProvider}
+        source="login-academia"
+        selectedRole="asesor"
+        onClose={() => setSsoProvider(null)}
+      />
     </div>
   );
 }

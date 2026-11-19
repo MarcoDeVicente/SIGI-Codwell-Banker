@@ -1,6 +1,14 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Heart,
   SlidersHorizontal,
@@ -25,10 +33,40 @@ import {
   ZoomIn,
   ZoomOut,
   MoveHorizontal,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Search,
+  SearchX,
+  ExternalLink,
+  UserCheck,
 } from "lucide-react";
 import Navbar from "@/components/Navbar";
-import { useSigiStore, PropertyItem } from "@/lib/store";
+import {
+  useSigiStore,
+  PropertyItem,
+  normalizeTextNoAccents,
+  resolveCanonicalCityKey,
+  doesLocationMatchCity,
+  ACADEMY_CERTIFIED_ADVISORS,
+  getInitials,
+} from "@/lib/store";
+import { normalizeMexicanPhone } from "@/lib/validations";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+
+function formatBudgetSliderLabel(valueMXN: number): string {
+  if (valueMXN < 1_000_000) {
+    return `$${valueMXN.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} MXN`;
+  }
+  const millions = valueMXN / 1_000_000;
+  if (millions >= 100 && Number.isInteger(millions)) {
+    return `$${millions.toFixed(0)}M MXN`;
+  }
+  return `$${millions.toFixed(1)}M MXN`;
+}
 
 interface PropertyMatchBreakdown {
   ai_match_score: number;
@@ -92,21 +130,265 @@ const TOUR_AREAS: TourRoomArea[] = [
   },
 ];
 
+const ALL_AMENITIES = [
+  "Acceso Controlado 24/7",
+  "Alberca Climatizada & Deck",
+  "Paneles Solares Integrados",
+  "Parque Lineal Privado",
+  "Cargador Eléctrico Nivel 2",
+] as const;
+
+const VISIT_TIME_SLOTS = [
+  { label: "09:00 AM", hour24: 9 },
+  { label: "10:00 AM", hour24: 10 },
+  { label: "11:00 AM", hour24: 11 },
+  { label: "12:00 PM", hour24: 12 },
+  { label: "01:00 PM", hour24: 13 },
+  { label: "02:00 PM", hour24: 14 },
+  { label: "03:00 PM", hour24: 15 },
+  { label: "04:00 PM", hour24: 16 },
+  { label: "05:00 PM", hour24: 17 },
+  { label: "06:00 PM", hour24: 18 },
+] as const;
+
+const MONTH_NAMES_ES = [
+  "Enero",
+  "Febrero",
+  "Marzo",
+  "Abril",
+  "Mayo",
+  "Junio",
+  "Julio",
+  "Agosto",
+  "Septiembre",
+  "Octubre",
+  "Noviembre",
+  "Diciembre",
+];
+
+const WEEKDAY_HEADERS_ES = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+function isSameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function getPropertyAmenities(prop?: PropertyItem): string[] {
+  if (!prop) return [...ALL_AMENITIES];
+  const f = (prop.folio || "").toUpperCase();
+  if (f === "MX-NL-2025-114") {
+    return [
+      "Acceso Controlado 24/7",
+      "Alberca Climatizada & Deck",
+      "Paneles Solares Integrados",
+      "Cargador Eléctrico Nivel 2",
+    ];
+  }
+  if (f === "MX-CDMX-2025-128") {
+    return [
+      "Acceso Controlado 24/7",
+      "Paneles Solares Integrados",
+      "Cargador Eléctrico Nivel 2",
+    ];
+  }
+  return [...ALL_AMENITIES];
+}
+
+function isPropertyExclusiveSigi(prop: PropertyItem): boolean {
+  return (
+    prop.status === "Exclusiva MLS" ||
+    Boolean(prop.featured) ||
+    prop.folio === "MX-QRO-2025-089" ||
+    prop.folio === "MX-QRO-2025-102"
+  );
+}
+
 export default function CompradorPage() {
+  const router = useRouter();
   const {
     properties,
     currentUser,
+    guestAssignedAdvisor,
+    users,
+    searchQuery,
+    setSearchQuery,
+    favoritePropertyIds,
+    toggleFavoriteProperty,
+    selectedBuyerPropertyId,
+    setSelectedBuyerPropertyId,
     scheduleVisit,
     applyAiMatchedProperties,
   } = useSigiStore();
 
-  // Estados interactivos de cabecera y filtros
+  useEffect(() => {
+    if (currentUser && currentUser.role !== "comprador") {
+      router.replace(`/${currentUser.role}` as never);
+    }
+  }, [currentUser, router]);
+
+  const assignedAdvisor =
+    currentUser?.assignedAdvisor || guestAssignedAdvisor || null;
+
+  // Estados interactivos de cabecera y filtros superiores
   const [operationMode, setOperationMode] = useState<"comprar" | "rentar">(
     "comprar"
   );
   const [zoneFilter, setZoneFilter] = useState("Juriquilla, Querétaro");
-  const [maxBudgetMillions, setMaxBudgetMillions] = useState<number>(18.5);
+  const [maxBudgetMXN, setMaxBudgetMXN] = useState<number>(18_500_000);
+  const maxBudgetMillions = +(maxBudgetMXN / 1_000_000).toFixed(2);
   const [typologyFilter, setTypologyFilter] = useState("Residencial / Villa");
+
+  // Rastreo de filtros modificados explícitamente por el usuario para filtrado estricto
+  const [, setUserChangedZone] = useState(false);
+  const [userChangedBudget, setUserChangedBudget] = useState(false);
+  const [userChangedTypology, setUserChangedTypology] = useState(false);
+
+  const handleSwitchOperationMode = (nextMode: "comprar" | "rentar") => {
+    setOperationMode(nextMode);
+    if (nextMode === "rentar") {
+      setMaxBudgetMXN((prev) => {
+        if (!userChangedBudget) return 150_000;
+        return Math.min(45_000_000, Math.max(7_500, prev));
+      });
+    } else {
+      setMaxBudgetMXN((prev) => {
+        if (!userChangedBudget || prev < 1_800_000) return 18_500_000;
+        return Math.min(120_000_000, Math.max(1_800_000, prev));
+      });
+    }
+  };
+
+  // Detección automática de ubicación real (navigator.geolocation + BigDataCloud)
+  const [detectedGeoCity, setDetectedGeoCity] = useState<string | null>(null);
+  const [customDetectedZoneOption, setCustomDetectedZoneOption] = useState<
+    string | null
+  >(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("geolocation" in navigator)) return;
+
+    let cancelled = false;
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const lat = position.coords.latitude;
+          const lon = position.coords.longitude;
+          const res = await fetch(
+            `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=es`
+          );
+          if (!res.ok || cancelled) return;
+          const data = (await res.json()) as {
+            city?: string;
+            locality?: string;
+            principalSubdivision?: string;
+          };
+          if (cancelled) return;
+
+          const rawCity = (
+            data.city ||
+            data.locality ||
+            data.principalSubdivision ||
+            ""
+          ).trim();
+          if (!rawCity) return;
+
+          setDetectedGeoCity(rawCity);
+
+          const canonical = resolveCanonicalCityKey(
+            `${rawCity} ${data.principalSubdivision || ""}`
+          );
+
+          if (canonical === "queretaro") {
+            setZoneFilter((prev) => (prev ? prev : "Juriquilla, Querétaro"));
+          } else if (canonical === "monterrey") {
+            setZoneFilter("Monterrey");
+          } else if (canonical === "cdmx") {
+            setZoneFilter("CDMX");
+          } else if (canonical === "riviera_maya") {
+            setZoneFilter("Riviera Maya & Tulum");
+          } else {
+            const customLabel = data.principalSubdivision
+              ? `${rawCity}, ${data.principalSubdivision}`
+              : rawCity;
+            setCustomDetectedZoneOption(customLabel);
+            setZoneFilter(customLabel);
+          }
+        } catch {
+          // Mantener zona predeterminada si la geocodificación inversa falla
+        }
+      },
+      () => {
+        // Permiso de geolocalización denegado: mantener Juriquilla, Querétaro
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 7000,
+        maximumAge: 60000,
+      }
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Estados del modal de Filtros Avanzados
+  const [filtersModalOpen, setFiltersModalOpen] = useState(false);
+
+  // Filtros avanzados aplicados
+  const [minBedrooms, setMinBedrooms] = useState<number>(0);
+  const [minBathrooms, setMinBathrooms] = useState<number>(0);
+  const [minParking, setMinParking] = useState<number>(0);
+  const [minConstructionM2, setMinConstructionM2] = useState<number>(0);
+  const [requiredAmenities, setRequiredAmenities] = useState<string[]>([]);
+  const [onlyExclusiveSigi, setOnlyExclusiveSigi] = useState<boolean>(false);
+
+  // Estados borradores dentro del modal de Filtros Avanzados
+  const [draftBedrooms, setDraftBedrooms] = useState<number>(0);
+  const [draftBathrooms, setDraftBathrooms] = useState<number>(0);
+  const [draftParking, setDraftParking] = useState<number>(0);
+  const [draftConstructionM2, setDraftConstructionM2] = useState<number>(0);
+  const [draftAmenities, setDraftAmenities] = useState<string[]>([]);
+  const [draftOnlyExclusive, setDraftOnlyExclusive] = useState<boolean>(false);
+
+  const activeAdvancedFiltersCount = useMemo(() => {
+    let count = 0;
+    if (minBedrooms > 0) count += 1;
+    if (minBathrooms > 0) count += 1;
+    if (minParking > 0) count += 1;
+    if (minConstructionM2 > 0) count += 1;
+    if (requiredAmenities.length > 0) count += 1;
+    if (onlyExclusiveSigi) count += 1;
+    return count;
+  }, [
+    minBedrooms,
+    minBathrooms,
+    minParking,
+    minConstructionM2,
+    requiredAmenities,
+    onlyExclusiveSigi,
+  ]);
+
+  const handleOpenFiltersModal = () => {
+    setDraftBedrooms(minBedrooms);
+    setDraftBathrooms(minBathrooms);
+    setDraftParking(minParking);
+    setDraftConstructionM2(minConstructionM2);
+    setDraftAmenities(requiredAmenities);
+    setDraftOnlyExclusive(onlyExclusiveSigi);
+    setFiltersModalOpen(true);
+  };
+
+  const handleToggleDraftAmenity = (amenity: string) => {
+    setDraftAmenities((prev) =>
+      prev.includes(amenity)
+        ? prev.filter((a) => a !== amenity)
+        : [...prev, amenity]
+    );
+  };
 
   // Estado del motor IA (/api/ai-match)
   const [matchedList, setMatchedList] = useState<PropertyItem[]>([]);
@@ -117,63 +399,6 @@ export default function CompradorPage() {
   const [filterStatusToast, setFilterStatusToast] = useState<string | null>(
     null
   );
-
-  // Propiedades mostradas en el carrusel tipo acordeón (ordenadas por el motor de IA)
-  const sourceProperties = matchedList.length > 0 ? matchedList : properties;
-  const carouselProperties = sourceProperties.slice(0, 4);
-
-  const [expandedId, setExpandedId] = useState<string>(
-    carouselProperties[0]?.id || "prop-juriquilla-089"
-  );
-  const [favorites, setFavorites] = useState<Record<string, boolean>>({
-    "prop-juriquilla-089": true,
-  });
-
-  // Modales y notificaciones interactivas
-  const [visitModalOpen, setVisitModalOpen] = useState(false);
-  const [visitPropertyTitle, setVisitPropertyTitle] = useState(
-    "Residencia Cumbres de Juriquilla"
-  );
-  const [visitDate, setVisitDate] = useState("Mañana, 11:30 AM");
-
-  // Estado de Alerta en Tiempo Real
-  const [alertActivated, setAlertActivated] = useState(false);
-  const [alertConfirmationMsg, setAlertConfirmationMsg] = useState<
-    string | null
-  >(null);
-
-  // Estado del Visor 360° Matterport 4K
-  const [tourModalOpen, setTourModalOpen] = useState(false);
-  const [selectedTourAreaId, setSelectedTourAreaId] =
-    useState<string>("estancia");
-  const [tourYawAngle, setTourYawAngle] = useState<number>(180);
-  const [tourZoom, setTourZoom] = useState<number>(1.05);
-  const [showHotspots, setShowHotspots] = useState<boolean>(true);
-
-  const [advisorToast, setAdvisorToast] = useState<string | null>(null);
-
-  const activeProperty =
-    carouselProperties.find((p) => p.id === expandedId) ||
-    carouselProperties[0] ||
-    properties[0];
-
-  const activeBreakdown: PropertyMatchBreakdown = (activeProperty &&
-    breakdownsByFolio[activeProperty.folio]) || {
-    ai_match_score: activeProperty?.aiMatch || 96,
-    rangoPresupuestal: 100,
-    espacioHomeOfficeFam: activeProperty?.aiMatch || 96,
-    distanciaColegiosBilingues: Math.max(
-      86,
-      (activeProperty?.aiMatch || 96) - 2
-    ),
-    alignmentHeadline: `${
-      activeProperty?.aiMatch || 96
-    }% Alineación Excepcional`,
-    alignmentDescription: `Supera el ${Math.max(
-      85,
-      (activeProperty?.aiMatch || 96) - 2
-    )}% de las propiedades analizadas en tu perfil patrimonial.`,
-  };
 
   // Llamada al motor /api/ai-match
   const runAiMatchEngine = useCallback(
@@ -239,18 +464,6 @@ export default function CompradorPage() {
 
           if (opts?.manualButton) {
             applyAiMatchedProperties(nextProps);
-            if (nextProps[0]) {
-              setExpandedId(nextProps[0].id);
-            }
-            setFilterStatusToast(
-              `Motor SIGI Match v4.8 actualizado: ${nextProps.length} propiedades ordenadas para ${zoneFilter} (${
-                operationMode === "rentar" ? "Rentar" : "Comprar"
-              } • Máx. $${maxBudgetMillions.toFixed(
-                1
-              )}M MXN • ${typologyFilter}). Mejor coincidencia: ${
-                nextProps[0]?.title
-              } (${nextProps[0]?.aiMatchDisplay}).`
-            );
           }
         }
       } catch {
@@ -331,18 +544,587 @@ export default function CompradorPage() {
     };
   }, [zoneFilter, maxBudgetMillions, typologyFilter, operationMode, properties]);
 
+  // Helper para obtener los nombres de asesores asociados a una propiedad para búsqueda en tiempo real
+  const getPropertyAssignedAdvisorNames = useCallback(
+    (prop: PropertyItem): string => {
+      const names: string[] = [];
+      if (assignedAdvisor?.fullName) {
+        names.push(assignedAdvisor.fullName);
+      }
+
+      const locText = `${prop.zone || ""} ${prop.location || ""}`;
+      for (const adv of ACADEMY_CERTIFIED_ADVISORS) {
+        if (doesLocationMatchCity(locText, adv.zone)) {
+          names.push(adv.fullName);
+        }
+      }
+
+      for (const u of users) {
+        if (u.role === "asesor") {
+          if (!u.city || doesLocationMatchCity(locText, u.city)) {
+            names.push(u.fullName);
+          }
+        }
+      }
+
+      return names.join(" ");
+    },
+    [assignedAdvisor, users]
+  );
+
+  // Propiedades base (ordenadas por el motor de IA, garantizando las 120 propiedades de las 4 sedes)
+  const sourceProperties = useMemo(() => {
+    if (matchedList.length === 0) return properties;
+    const matchedFolios = new Set(matchedList.map((p) => p.folio));
+    const missingFromMatched = properties.filter(
+      (p) => !matchedFolios.has(p.folio)
+    );
+    return missingFromMatched.length > 0
+      ? [...matchedList, ...missingFromMatched]
+      : matchedList;
+  }, [matchedList, properties]);
+
+  // Filtrado combinado en tiempo real: Buscador superior (global en 4 ciudades) + Zona + Presupuesto + Tipología + Filtros Avanzados
+  const filteredProperties = useMemo(() => {
+    const q = normalizeTextNoAccents(searchQuery.trim());
+    const hasSearch = q.length > 0;
+
+    return sourceProperties.filter((prop) => {
+      // 1. Buscador superior en tiempo real (busca en las 120 propiedades de las 4 ciudades por título, ubicación, zona, folio o tipología)
+      if (hasSearch) {
+        const advisorNames = `${
+          prop.advisorName || ""
+        } ${getPropertyAssignedAdvisorNames(prop)}`;
+        const searchableText = normalizeTextNoAccents(
+          `${prop.title} ${prop.location} ${prop.zone || ""} ${prop.folio} ${
+            prop.typology || ""
+          } ${advisorNames}`
+        );
+        if (!searchableText.includes(q)) {
+          return false;
+        }
+      }
+
+      // 2. Filtrado por ciudad/zona activa (se omite cuando hay búsqueda global activa en el buscador superior)
+      if (!hasSearch && zoneFilter.trim().length > 0) {
+        const propLocationText = `${prop.zone || ""} ${prop.location || ""} ${
+          prop.title || ""
+        }`;
+        const matchesZone =
+          doesLocationMatchCity(propLocationText, zoneFilter) ||
+          normalizeTextNoAccents(propLocationText).includes(
+            normalizeTextNoAccents(zoneFilter)
+          );
+        if (!matchesZone) {
+          return false;
+        }
+      }
+
+      // 3. Filtro de Presupuesto Máximo (cuando el usuario ajusta el slider)
+      if (userChangedBudget) {
+        if (operationMode === "rentar") {
+          const effectiveRent =
+            prop.rentPrice || Math.round(prop.salePrice * 0.0068);
+          if (effectiveRent > maxBudgetMXN) {
+            return false;
+          }
+        } else {
+          if (prop.salePrice > maxBudgetMXN) {
+            return false;
+          }
+        }
+      }
+
+      // 4. Filtro de Tipología Patrimonial (cuando el usuario selecciona una tipología)
+      if (userChangedTypology && typologyFilter.trim().length > 0) {
+        const normFilterTypo = normalizeTextNoAccents(typologyFilter);
+        const normPropTypo = normalizeTextNoAccents(
+          `${prop.typology || ""} ${prop.title}`
+        );
+        const isPenthouseFilter = normFilterTypo.includes("penthouse");
+        const isTerrenoFilter = normFilterTypo.includes("terreno");
+        const isResidencialFilter = normFilterTypo.includes("residencial");
+
+        if (isPenthouseFilter) {
+          if (
+            !normPropTypo.includes("penthouse") &&
+            !normPropTypo.includes("sky") &&
+            !normPropTypo.includes("torre")
+          ) {
+            return false;
+          }
+        } else if (isTerrenoFilter) {
+          if (
+            !normPropTypo.includes("terreno") &&
+            !normPropTypo.includes("lote")
+          ) {
+            return false;
+          }
+        } else if (isResidencialFilter) {
+          if (
+            !normPropTypo.includes("residencial") &&
+            !normPropTypo.includes("villa")
+          ) {
+            return false;
+          }
+        }
+      }
+
+      // 5. Filtros Avanzados del Modal "Filtros"
+      if (minBedrooms > 0 && (prop.bedrooms || 0) < minBedrooms) {
+        return false;
+      }
+      if (minBathrooms > 0 && (prop.bathrooms || 0) < minBathrooms) {
+        return false;
+      }
+      if (minParking > 0 && (prop.parkingSpaces ?? 2) < minParking) {
+        return false;
+      }
+      if (
+        minConstructionM2 > 0 &&
+        (prop.constructionArea || 0) < minConstructionM2
+      ) {
+        return false;
+      }
+      if (requiredAmenities.length > 0) {
+        const propAmenities = getPropertyAmenities(prop);
+        const hasAll = requiredAmenities.every((req) =>
+          propAmenities.includes(req)
+        );
+        if (!hasAll) {
+          return false;
+        }
+      }
+      if (onlyExclusiveSigi && !isPropertyExclusiveSigi(prop)) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [
+    sourceProperties,
+    searchQuery,
+    getPropertyAssignedAdvisorNames,
+    zoneFilter,
+    userChangedBudget,
+    maxBudgetMXN,
+    operationMode,
+    userChangedTypology,
+    typologyFilter,
+    minBedrooms,
+    minBathrooms,
+    minParking,
+    minConstructionM2,
+    requiredAmenities,
+    onlyExclusiveSigi,
+  ]);
+
+  const carouselSectionRef = useRef<HTMLDivElement>(null);
+  const carouselProperties = filteredProperties.slice(0, 4);
+
+  const [expandedId, setExpandedId] = useState<string>(
+    carouselProperties[0]?.id || "prop-qro-101"
+  );
+
+  // Scroll suave hacia el carrusel y selección automática de la primera coincidencia al dar Enter en Navbar
+  const scrollToCarouselAndSelectFirst = useCallback(() => {
+    window.setTimeout(() => {
+      if (filteredProperties.length > 0) {
+        setExpandedId(filteredProperties[0].id);
+      }
+      carouselSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 60);
+  }, [filteredProperties]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.sessionStorage.getItem("sigi_scroll_to_carousel") === "1") {
+      window.sessionStorage.removeItem("sigi_scroll_to_carousel");
+      scrollToCarouselAndSelectFirst();
+    }
+    const handleScrollEvent = () => {
+      window.sessionStorage.removeItem("sigi_scroll_to_carousel");
+      scrollToCarouselAndSelectFirst();
+    };
+    window.addEventListener("sigi-scroll-to-carousel", handleScrollEvent);
+    return () => {
+      window.removeEventListener("sigi-scroll-to-carousel", handleScrollEvent);
+    };
+  }, [scrollToCarouselAndSelectFirst]);
+
+  // Abrir propiedad en el visor principal cuando el comprador la selecciona desde el modal "Favoritos" o Enter en Navbar
+  useEffect(() => {
+    if (!selectedBuyerPropertyId) return;
+    const timer = window.setTimeout(() => {
+      const targetProp = properties.find(
+        (p) => p.id === selectedBuyerPropertyId
+      );
+      if (targetProp) {
+        if (searchQuery.trim().length === 0) {
+          const propCityKey = resolveCanonicalCityKey(
+            `${targetProp.zone || ""} ${targetProp.location || ""}`
+          );
+          const currentCityKey = resolveCanonicalCityKey(zoneFilter);
+          if (propCityKey && propCityKey !== currentCityKey) {
+            if (propCityKey === "queretaro") {
+              setZoneFilter("Juriquilla, Querétaro");
+            } else if (propCityKey === "monterrey") {
+              setZoneFilter("Monterrey");
+            } else if (propCityKey === "cdmx") {
+              setZoneFilter("CDMX");
+            } else if (propCityKey === "riviera_maya") {
+              setZoneFilter("Riviera Maya & Tulum");
+            } else if (targetProp.zone) {
+              setZoneFilter(targetProp.zone);
+            }
+          }
+        }
+        setExpandedId(targetProp.id);
+      }
+      setSelectedBuyerPropertyId(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    selectedBuyerPropertyId,
+    properties,
+    zoneFilter,
+    searchQuery,
+    setSelectedBuyerPropertyId,
+  ]);
+
+  const handleApplyAdvancedFilters = () => {
+    setMinBedrooms(draftBedrooms);
+    setMinBathrooms(draftBathrooms);
+    setMinParking(draftParking);
+    setMinConstructionM2(draftConstructionM2);
+    setRequiredAmenities(draftAmenities);
+    setOnlyExclusiveSigi(draftOnlyExclusive);
+    setFiltersModalOpen(false);
+    void runAiMatchEngine({ manualButton: true });
+    setFilterStatusToast(
+      `Filtros avanzados SIGI aplicados correctamente (${
+        (draftBedrooms > 0 ? 1 : 0) +
+        (draftBathrooms > 0 ? 1 : 0) +
+        (draftParking > 0 ? 1 : 0) +
+        (draftConstructionM2 > 0 ? 1 : 0) +
+        (draftAmenities.length > 0 ? 1 : 0) +
+        (draftOnlyExclusive ? 1 : 0)
+      } criterios activos).`
+    );
+  };
+
+  const handleClearAdvancedFiltersInModal = () => {
+    setDraftBedrooms(0);
+    setDraftBathrooms(0);
+    setDraftParking(0);
+    setDraftConstructionM2(0);
+    setDraftAmenities([]);
+    setDraftOnlyExclusive(false);
+    setMinBedrooms(0);
+    setMinBathrooms(0);
+    setMinParking(0);
+    setMinConstructionM2(0);
+    setRequiredAmenities([]);
+    setOnlyExclusiveSigi(false);
+  };
+
+  const handleResetAllFilters = () => {
+    setSearchQuery("");
+    setZoneFilter("Juriquilla, Querétaro");
+    setMaxBudgetMXN(operationMode === "rentar" ? 150_000 : 18_500_000);
+    setTypologyFilter("Residencial / Villa");
+    setUserChangedZone(false);
+    setUserChangedBudget(false);
+    setUserChangedTypology(false);
+    handleClearAdvancedFiltersInModal();
+    setFiltersModalOpen(false);
+    setFilterStatusToast(
+      "Todos los filtros y criterios de búsqueda fueron restablecidos."
+    );
+  };
+
+  // ====================================================================
+  // MODIFICACIÓN 3: MINI-CALENDARIO INTERACTIVO Y HORARIOS (9:00 AM - 6:00 PM)
+  // ====================================================================
+  const [visitModalOpen, setVisitModalOpen] = useState(false);
+  const [visitPropertyTitle, setVisitPropertyTitle] = useState(
+    "Residencia Cumbres de Juriquilla"
+  );
+  const [systemNow, setSystemNow] = useState<Date | null>(null);
+  const [calendarMonth, setCalendarMonth] = useState<{
+    year: number;
+    month: number;
+  }>({ year: 2026, month: 10 });
+  const [selectedVisitDate, setSelectedVisitDate] = useState<Date | null>(null);
+  const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>("11:00 AM");
+  const [isConfirmingVisit, setIsConfirmingVisit] = useState<boolean>(false);
+
+  // Inicializar reloj y mes actual únicamente en el cliente tras montar
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      const now = new Date();
+      setSystemNow(now);
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      setCalendarMonth({ year: today.getFullYear(), month: today.getMonth() });
+      setSelectedVisitDate((prev) => prev ?? today);
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
+
+  // Reloj del sistema en vivo para el modal de agendar cita privada
+  useEffect(() => {
+    if (!visitModalOpen) return;
+    const rafId = window.requestAnimationFrame(() => {
+      setSystemNow(new Date());
+    });
+    const interval = window.setInterval(() => {
+      setSystemNow(new Date());
+    }, 1000);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearInterval(interval);
+    };
+  }, [visitModalOpen]);
+
+  const todayMidnight = useMemo(() => {
+    if (!systemNow) return null;
+    return new Date(
+      systemNow.getFullYear(),
+      systemNow.getMonth(),
+      systemNow.getDate()
+    );
+  }, [systemNow]);
+
+  const isSlotPassedForDate = useCallback(
+    (date: Date | null, hour24: number, nowRef: Date | null): boolean => {
+      if (!date || !nowRef) return false;
+      if (!isSameDay(date, nowRef)) return false;
+      return (
+        nowRef.getHours() > hour24 ||
+        (nowRef.getHours() === hour24 &&
+          (nowRef.getMinutes() > 0 || nowRef.getSeconds() > 0))
+      );
+    },
+    []
+  );
+
+  // Horario efectivo seleccionado (si el día es hoy y la hora ya pasó, toma el primer horario disponible)
+  const effectiveSelectedTimeSlot = useMemo(() => {
+    const currentSlotObj = VISIT_TIME_SLOTS.find(
+      (s) => s.label === selectedTimeSlot
+    );
+    const currentInvalid =
+      !currentSlotObj ||
+      isSlotPassedForDate(selectedVisitDate, currentSlotObj.hour24, systemNow);
+
+    if (!currentInvalid) {
+      return selectedTimeSlot;
+    }
+
+    const firstAvailable = VISIT_TIME_SLOTS.find(
+      (s) => !isSlotPassedForDate(selectedVisitDate, s.hour24, systemNow)
+    );
+    return firstAvailable ? firstAvailable.label : "";
+  }, [selectedVisitDate, selectedTimeSlot, systemNow, isSlotPassedForDate]);
+
+  const formattedLiveSystemDateTime = useMemo(() => {
+    if (!systemNow) return "Sincronizando reloj del sistema...";
+    try {
+      return new Intl.DateTimeFormat("es-MX", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(systemNow);
+    } catch {
+      return systemNow.toLocaleString("es-MX");
+    }
+  }, [systemNow]);
+
+  const formattedSelectedDateLong = useMemo(() => {
+    if (!selectedVisitDate) return "—";
+    try {
+      return new Intl.DateTimeFormat("es-MX", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      }).format(selectedVisitDate);
+    } catch {
+      return selectedVisitDate.toLocaleDateString("es-MX");
+    }
+  }, [selectedVisitDate]);
+
+  // Construcción de días del mes en el mini-calendario
+  const calendarGridDays = useMemo(() => {
+    const firstDayOfMonth = new Date(
+      calendarMonth.year,
+      calendarMonth.month,
+      1
+    );
+    const startWeekday = firstDayOfMonth.getDay(); // 0 (Dom) - 6 (Sáb)
+    const daysInMonth = new Date(
+      calendarMonth.year,
+      calendarMonth.month + 1,
+      0
+    ).getDate();
+
+    const cells: Array<{ date: Date | null; dayNumber: number | null }> = [];
+    for (let i = 0; i < startWeekday; i += 1) {
+      cells.push({ date: null, dayNumber: null });
+    }
+    for (let d = 1; d <= daysInMonth; d += 1) {
+      cells.push({
+        date: new Date(calendarMonth.year, calendarMonth.month, d),
+        dayNumber: d,
+      });
+    }
+    return cells;
+  }, [calendarMonth]);
+
+  const canGoPrevMonth = useMemo(() => {
+    if (!todayMidnight) return false;
+    return (
+      calendarMonth.year > todayMidnight.getFullYear() ||
+      (calendarMonth.year === todayMidnight.getFullYear() &&
+        calendarMonth.month > todayMidnight.getMonth())
+    );
+  }, [calendarMonth, todayMidnight]);
+
+  const handlePrevMonth = () => {
+    if (!canGoPrevMonth) return;
+    setCalendarMonth((prev) => {
+      if (prev.month === 0) {
+        return { year: prev.year - 1, month: 11 };
+      }
+      return { year: prev.year, month: prev.month - 1 };
+    });
+  };
+
+  const handleNextMonth = () => {
+    setCalendarMonth((prev) => {
+      if (prev.month === 11) {
+        return { year: prev.year + 1, month: 0 };
+      }
+      return { year: prev.year, month: prev.month + 1 };
+    });
+  };
+
+  // Estado de Alerta en Tiempo Real
+  const [alertActivated, setAlertActivated] = useState(false);
+  const [alertConfirmationMsg, setAlertConfirmationMsg] = useState<
+    string | null
+  >(null);
+
+  // Estado del Visor 360° Matterport 4K
+  const [tourModalOpen, setTourModalOpen] = useState(false);
+  const [selectedTourAreaId, setSelectedTourAreaId] =
+    useState<string>("estancia");
+  const [tourYawAngle, setTourYawAngle] = useState<number>(180);
+  const [tourZoom, setTourZoom] = useState<number>(1.05);
+  const [showHotspots, setShowHotspots] = useState<boolean>(true);
+
+  const [advisorToast, setAdvisorToast] = useState<string | null>(null);
+
+  const activeProperty =
+    carouselProperties.find((p) => p.id === expandedId) ||
+    carouselProperties[0] ||
+    properties[0];
+
+  const activeBreakdown: PropertyMatchBreakdown = (activeProperty &&
+    breakdownsByFolio[activeProperty.folio]) || {
+    ai_match_score: activeProperty?.aiMatch || 96,
+    rangoPresupuestal: 100,
+    espacioHomeOfficeFam: activeProperty?.aiMatch || 96,
+    distanciaColegiosBilingues: Math.max(
+      86,
+      (activeProperty?.aiMatch || 96) - 2
+    ),
+    alignmentHeadline: `${
+      activeProperty?.aiMatch || 96
+    }% Alineación Excepcional`,
+    alignmentDescription: `Supera el ${Math.max(
+      85,
+      (activeProperty?.aiMatch || 96) - 2
+    )}% de las propiedades analizadas en tu perfil patrimonial.`,
+  };
+
   const toggleFavorite = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setFavorites((prev) => ({ ...prev, [id]: !prev[id] }));
+    toggleFavoriteProperty(id);
   };
+
+  const formattedPrintDate = useMemo(() => {
+    if (!systemNow) return "";
+    try {
+      return new Intl.DateTimeFormat("es-MX", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      }).format(systemNow);
+    } catch {
+      return systemNow.toLocaleDateString("es-MX");
+    }
+  }, [systemNow]);
 
   const openScheduleModal = (title: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    const now = new Date();
+    setSystemNow(now);
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const hasSlotToday = VISIT_TIME_SLOTS.some(
+      (slot) => !isSlotPassedForDate(today, slot.hour24, now)
+    );
+
+    const initialDate = hasSlotToday
+      ? today
+      : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+    setSelectedVisitDate(initialDate);
+    setCalendarMonth({
+      year: initialDate.getFullYear(),
+      month: initialDate.getMonth(),
+    });
+
+    const firstSlot = VISIT_TIME_SLOTS.find(
+      (slot) => !isSlotPassedForDate(initialDate, slot.hour24, now)
+    );
+    setSelectedTimeSlot(firstSlot ? firstSlot.label : "11:00 AM");
     setVisitPropertyTitle(title);
     setVisitModalOpen(true);
   };
 
-  // Botón WhatsApp funcional (https://wa.me/525589201200 con Folio SIGI prellenado)
+  const handleConfirmPrivateVisit = async () => {
+    if (!effectiveSelectedTimeSlot) return;
+    setIsConfirmingVisit(true);
+    const folio = activeProperty?.folio || "MX-QRO-2025-089";
+    const buyerName = currentUser?.fullName || "Comprador SIGI";
+    const buyerPhone = currentUser?.phone || "+52 55 8920 1200";
+    const scheduleLabel = `${formattedSelectedDateLong} • ${effectiveSelectedTimeSlot}`;
+
+    await scheduleVisit({
+      propertyFolio: folio,
+      propertyTitle: visitPropertyTitle,
+      visitorName: buyerName,
+      visitorPhone: buyerPhone,
+      scheduleLabel,
+      visitPurpose: "Cita Privada Residencial",
+    });
+
+    setIsConfirmingVisit(false);
+    setVisitModalOpen(false);
+    const confirmMsg = `Cita privada confirmada para "${visitPropertyTitle}" (Folio ${folio}) el ${scheduleLabel} a nombre de ${buyerName} (${buyerPhone}). Guardada en public.visits y notificada en public.notifications.`;
+    setAdvisorToast(confirmMsg);
+    setFilterStatusToast(confirmMsg);
+  };
+
+  // Botón WhatsApp funcional conectado al asesor elegido por el comprador
   const handleOpenWhatsApp = () => {
     const folio = activeProperty?.folio || "MX-QRO-2025-089";
     const title = activeProperty?.title || "Residencia Cumbres de Juriquilla";
@@ -351,9 +1133,14 @@ export default function CompradorPage() {
         ? `${activeProperty.rentPriceDisplay} MXN/mes`
         : activeProperty?.salePriceDisplay || "$4,350,000 MXN";
     const matchLabel = activeProperty?.aiMatchDisplay || "96%";
+    const advisorName =
+      assignedAdvisor?.fullName || "Asesor Patrimonial Coldwell Banker";
+    const advisorDigits =
+      normalizeMexicanPhone(assignedAdvisor?.phone || "") || "5589201200";
+    const advisorPhoneDisplay = assignedAdvisor?.phone || "+52 55 8920 1200";
 
-    const text = `Hola Lic. Mariana De la Vega, solicito información y atención prioritaria sobre la propiedad "${title}" con Folio SIGI: ${folio} (${priceLabel} • ${matchLabel} Match IA) vista en el portal Coldwell Banker México.`;
-    const whatsappUrl = `https://wa.me/525589201200?text=${encodeURIComponent(
+    const text = `Hola ${advisorName}, solicito información y atención prioritaria sobre la propiedad "${title}" con Folio SIGI: ${folio} (${priceLabel} • ${matchLabel} Match IA) vista en el portal Coldwell Banker México.`;
+    const whatsappUrl = `https://wa.me/52${advisorDigits}?text=${encodeURIComponent(
       text
     )}`;
 
@@ -362,7 +1149,7 @@ export default function CompradorPage() {
     }
 
     setAdvisorToast(
-      `Enlace WhatsApp abierto con Lic. Mariana De la Vega (+52 55 8920 1200) para Folio SIGI ${folio}.`
+      `Enlace WhatsApp abierto con ${advisorName} (${advisorPhoneDisplay}) para Folio SIGI ${folio}.`
     );
   };
 
@@ -466,6 +1253,27 @@ export default function CompradorPage() {
     activeProperty?.location
   );
 
+  const mapQueryAddress =
+    activeProperty?.location || "Paseo de la Alborada #104, Juriquilla, QRO.";
+  const googleMapsEmbedUrl = `https://maps.google.com/maps?q=${encodeURIComponent(
+    mapQueryAddress
+  )}&t=&z=15&ie=UTF8&iwloc=&output=embed`;
+  const googleMapsExternalUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    mapQueryAddress
+  )}`;
+
+  if (currentUser && currentUser.role !== "comprador") {
+    return (
+      <div className="min-h-screen bg-[#F3F6FA] flex items-center justify-center p-6">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-lg p-6 text-center max-w-sm">
+          <p className="text-sm font-extrabold text-[#0B1F3A]">
+            Redirigiendo a tu panel autorizado...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#F3F6FA] text-slate-900 flex flex-col justify-between">
       {/* Barra de Navegación Superior (oculta al imprimir PDF) */}
@@ -473,134 +1281,272 @@ export default function CompradorPage() {
         <Navbar />
       </div>
 
-      {/* Layout exclusivo para Impresión / Descarga de Ficha PDF Catastral */}
-      <section className="hidden print:block p-8 bg-white text-slate-900 space-y-6">
-        <div className="flex items-center justify-between border-b-2 border-[#0B1F3A] pb-4">
-          <div>
-            <p className="text-xs font-extrabold uppercase tracking-widest text-[#0B1F3A]">
-              COLDWELL BANKER MÉXICO • SISTEMA INTEGRAL DE GESTIÓN INMOBILIARIA
-              (SIGI v4.8)
-            </p>
-            <h1 className="text-2xl font-extrabold text-[#0B1F3A] mt-1">
-              DOSSIER TÉCNICO &amp; FICHA CATASTRAL CERTIFICADA
-            </h1>
-            <p className="text-xs text-slate-600">
-              Expediente auditado bajo la norma oficial NOM-247-SE-2021 y
-              LFPDPPP
-            </p>
-          </div>
-          <div className="text-right">
-            <span className="inline-block px-3 py-1 rounded-full bg-slate-100 border border-slate-300 text-xs font-extrabold text-[#0B1F3A]">
-              FOLIO SIGI: {activeProperty?.folio || "MX-QRO-2025-089"}
-            </span>
-            <p className="text-xs font-bold text-emerald-700 mt-1">
-              Compatibilidad Algorítmica:{" "}
-              {activeProperty?.aiMatchDisplay || "96%"} Match
-            </p>
-          </div>
-        </div>
+      {/* Reglas @media print y Layout editorial exclusivo para Dossier Técnico Certificado (Ficha PDF) */}
+      <style>{`
+        @media print {
+          @page {
+            size: A4 portrait;
+            margin: 12mm;
+          }
+          body {
+            background: #ffffff !important;
+            color: #0f172a !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        }
+      `}</style>
 
-        <div className="grid grid-cols-2 gap-6">
-          <div className="space-y-2">
-            <p className="text-xs font-bold uppercase text-slate-500">
-              Propiedad Patrimonial
-            </p>
-            <h2 className="text-xl font-extrabold text-[#0B1F3A]">
-              {activeProperty?.title}
-            </h2>
-            <p className="text-xs text-slate-700">{activeProperty?.location}</p>
-            <p className="text-xs font-semibold text-slate-600">
-              Zona: {activeProperty?.zone || zoneFilter} | Tipología:{" "}
-              {activeProperty?.typology || typologyFilter}
-            </p>
-          </div>
-
-          <div className="space-y-1 text-right">
-            <p className="text-xs font-bold uppercase text-slate-500">
-              Valuación Oficial de Mercado
-            </p>
-            <p className="text-2xl font-extrabold text-[#0B1F3A]">
-              {activeProperty?.salePriceDisplay} MXN
-            </p>
-            {activeProperty?.rentPriceDisplay && (
-              <p className="text-xs font-bold text-sky-700">
-                Renta Mensual Estimada: {activeProperty.rentPriceDisplay}{" "}
-                MXN/mes
+      <section className="hidden print:block w-full max-w-4xl mx-auto p-6 bg-white text-slate-900 space-y-5">
+        {/* 1. Encabezado institucional con logotipo SIGI Coldwell Banker México, Folio oficial y fecha */}
+        <div className="flex items-start justify-between gap-4 border-b-2 border-[#0B1F3A] pb-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-xl bg-[#0B1F3A] text-white flex items-center justify-center shrink-0">
+              <Building2 className="w-6 h-6 text-sky-300" />
+            </div>
+            <div>
+              <p className="text-[11px] font-extrabold uppercase tracking-[0.14em] text-[#0B1F3A]">
+                SIGI • COLDWELL BANKER MÉXICO
               </p>
-            )}
-            <p className="text-xs text-emerald-700 font-semibold">
-              Plusvalía Anual: {activeProperty?.plusvalia || "+11.8%"} • Cap
-              Rate: {activeProperty?.capRate || "8.8% Anual"}
+              <h1 className="text-xl font-extrabold text-[#0B1F3A] leading-tight mt-0.5">
+                DOSSIER TÉCNICO &amp; FICHA CATASTRAL CERTIFICADA
+              </h1>
+              <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                Sistema Integral de Gestión Inmobiliaria • Intelligence v4.8
+              </p>
+            </div>
+          </div>
+
+          <div className="text-right space-y-1 shrink-0">
+            <span className="inline-block px-3.5 py-1 rounded-lg bg-[#0B1F3A] text-white text-xs font-extrabold tracking-wider">
+              FOLIO OFICIAL: {activeProperty?.folio || "MX-QRO-2025-089"}
+            </span>
+            <p className="text-[11px] font-bold text-slate-600">
+              Fecha de emisión: {formattedPrintDate}
+            </p>
+            <p className="text-[11px] font-extrabold text-[#10B981]">
+              Estatus: {activeProperty?.status || "Exclusiva MLS"}
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-3 border-y border-slate-200 py-4 text-xs">
-          <div>
-            <span className="text-slate-500 block">Superficie de Terreno</span>
-            <strong className="text-sm text-[#0B1F3A]">
-              {activeProperty?.landAreaDisplay}
-            </strong>
+        {/* 2. Fotografía principal (aspect-video object-cover rounded-xl) y bloque de Precio de Venta / Renta destacado */}
+        <div className="grid grid-cols-12 gap-5 items-stretch">
+          <div className="col-span-7">
+            <div className="w-full aspect-video rounded-xl overflow-hidden border border-slate-200 bg-slate-100">
+              <img
+                src={activeProperty?.image}
+                alt={activeProperty?.title || "Propiedad SIGI"}
+                className="w-full h-full aspect-video object-cover rounded-xl"
+              />
+            </div>
           </div>
-          <div>
-            <span className="text-slate-500 block">
-              Superficie Construcción
-            </span>
-            <strong className="text-sm text-[#0B1F3A]">
-              {activeProperty?.constructionAreaDisplay}
-            </strong>
-          </div>
-          <div>
-            <span className="text-slate-500 block">Distribución</span>
-            <strong className="text-sm text-[#0B1F3A]">
-              {activeProperty?.bedroomsDisplay} •{" "}
-              {activeProperty?.bathroomsDisplay}
-            </strong>
-          </div>
-          <div>
-            <span className="text-slate-500 block">Estacionamiento</span>
-            <strong className="text-sm text-[#0B1F3A]">
-              {activeProperty?.parkingDisplay || "2 Autos"}
-            </strong>
+
+          <div className="col-span-5 rounded-xl bg-[#F4F7FB] border border-slate-200 p-4 flex flex-col justify-between">
+            <div className="space-y-1.5">
+              <span className="inline-block px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase tracking-wider">
+                ACTIVO RESIDENCIAL AUDITADO
+              </span>
+              <h2 className="text-lg font-extrabold text-[#0B1F3A] leading-snug">
+                {activeProperty?.title}
+              </h2>
+              <p className="text-xs text-slate-600 leading-snug">
+                {activeProperty?.location}
+              </p>
+            </div>
+
+            <div className="pt-3 mt-3 border-t border-slate-200/90 space-y-1.5">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 block">
+                  Precio de Venta Oficial
+                </span>
+                <p className="text-2xl font-extrabold text-[#0B1F3A]">
+                  {activeProperty?.salePriceDisplay?.includes("MXN")
+                    ? activeProperty.salePriceDisplay
+                    : `${activeProperty?.salePriceDisplay || "$4,350,000"} MXN`}
+                </p>
+              </div>
+
+              {activeProperty?.rentPriceDisplay && (
+                <div className="pt-1">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700 block">
+                    Renta Mensual Estimada
+                  </span>
+                  <p className="text-sm font-extrabold text-sky-800">
+                    {activeProperty.rentPriceDisplay} MXN / mes
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
+        {/* 3. Cuadrícula ordenada de Especificaciones Técnicas y Catastrales */}
         <div className="space-y-2">
-          <h3 className="text-xs font-extrabold uppercase text-[#0B1F3A]">
-            Desglose Algorítmico SIGI Match v4.8
+          <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
+            Especificaciones Técnicas y Catastrales
           </h3>
-          <div className="grid grid-cols-3 gap-4 text-xs">
-            <div className="p-3 rounded-xl border border-slate-200">
-              <span className="text-slate-500 block">Rango Presupuestal</span>
-              <strong className="text-emerald-700">
-                {activeBreakdown.rangoPresupuestal}% OK
+          <div className="grid grid-cols-4 gap-2.5 text-xs">
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Superficie de Terreno (m²)
+              </span>
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block">
+                {activeProperty?.landAreaDisplay || "315 m²"}
               </strong>
             </div>
-            <div className="p-3 rounded-xl border border-slate-200">
-              <span className="text-slate-500 block">
-                Espacio para Home Office &amp; Fam
+
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Superficie Construcción (m²)
               </span>
-              <strong className="text-emerald-700">
-                {activeBreakdown.espacioHomeOfficeFam}% OK
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block">
+                {activeProperty?.constructionAreaDisplay || "280 m²"}
               </strong>
             </div>
-            <div className="p-3 rounded-xl border border-slate-200">
-              <span className="text-slate-500 block">
-                Distancia a Colegios Bilingües
+
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Recámaras
               </span>
-              <strong className="text-emerald-700">
-                {activeBreakdown.distanciaColegiosBilingues}% OK
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block">
+                {activeProperty?.bedroomsDisplay || "3 Recámaras"}
+              </strong>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Baños
+              </span>
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block">
+                {activeProperty?.bathroomsDisplay || "3.5 Baños"}
+              </strong>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Estacionamientos
+              </span>
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block">
+                {activeProperty?.parkingDisplay || "2 Autos"}
+              </strong>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200 col-span-2">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Zona Patrimonial
+              </span>
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block truncate">
+                {activeProperty?.zone || zoneFilter}
+              </strong>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#F4F7FB] border border-slate-200">
+              <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                Tipología
+              </span>
+              <strong className="text-sm font-extrabold text-[#0B1F3A] mt-0.5 block truncate">
+                {activeProperty?.typology || typologyFilter}
               </strong>
             </div>
           </div>
         </div>
 
-        <div className="pt-4 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
-          <div>
-            <strong>Asesor Inmobiliario Certificado:</strong> Lic. Mariana De la
-            Vega (Senior Luxury Specialist • Certificación AMPI)
+        {/* 4. Bloque de Análisis Algorítmico (Match IA, Plusvalía Anual, Cap Rate) y Lista Estructurada de Amenidades */}
+        <div className="grid grid-cols-12 gap-4 items-stretch">
+          <div className="col-span-7 rounded-xl border border-slate-200 p-4 space-y-3">
+            <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
+              Análisis Algorítmico • SIGI Match v4.8
+            </h3>
+            <div className="grid grid-cols-3 gap-2.5 text-xs">
+              <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200">
+                <span className="text-[10px] font-bold uppercase text-emerald-800 block">
+                  Match IA
+                </span>
+                <strong className="text-base font-extrabold text-emerald-700">
+                  {activeProperty?.aiMatchDisplay || "96%"}
+                </strong>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#F4F7FB] border border-slate-200">
+                <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                  Plusvalía Anual
+                </span>
+                <strong className="text-base font-extrabold text-[#0B1F3A]">
+                  {activeProperty?.plusvalia || "+11.8%"}
+                </strong>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#F4F7FB] border border-slate-200">
+                <span className="text-[10px] font-bold uppercase text-slate-500 block">
+                  Cap Rate
+                </span>
+                <strong className="text-base font-extrabold text-sky-700">
+                  {activeProperty?.capRate || "8.8% Anual"}
+                </strong>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 pt-1 text-[11px]">
+              <div className="p-2 rounded-lg bg-slate-50 border border-slate-200/80">
+                <span className="text-slate-500 block">Rango Presupuestal</span>
+                <strong className="text-[#0B1F3A]">
+                  {activeBreakdown.rangoPresupuestal}% OK
+                </strong>
+              </div>
+              <div className="p-2 rounded-lg bg-slate-50 border border-slate-200/80">
+                <span className="text-slate-500 block">
+                  Home Office &amp; Fam
+                </span>
+                <strong className="text-[#0B1F3A]">
+                  {activeBreakdown.espacioHomeOfficeFam}% OK
+                </strong>
+              </div>
+              <div className="p-2 rounded-lg bg-slate-50 border border-slate-200/80">
+                <span className="text-slate-500 block">Colegios Bilingües</span>
+                <strong className="text-[#0B1F3A]">
+                  {activeBreakdown.distanciaColegiosBilingues}% OK
+                </strong>
+              </div>
+            </div>
           </div>
-          <div>Contacto Directo: +52 55 8920 1200 • coldwellbanker.com.mx</div>
+
+          <div className="col-span-5 rounded-xl border border-slate-200 p-4 space-y-2.5">
+            <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
+              Amenidades &amp; Privilegios
+            </h3>
+            <ul className="space-y-1.5 text-xs text-slate-700">
+              {getPropertyAmenities(activeProperty).map((amenity) => (
+                <li
+                  key={amenity}
+                  className="flex items-center gap-2 font-semibold"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] shrink-0" />
+                  <span>{amenity}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        {/* 5. Pie de página legal limpio con cumplimiento NOM-247-SE-2021 */}
+        <div className="pt-3 border-t-2 border-slate-200 flex items-center justify-between gap-4 text-[11px] text-slate-600">
+          <div>
+            <p className="font-extrabold text-[#0B1F3A]">
+              {assignedAdvisor
+                ? `Asesor Inmobiliario Certificado: ${assignedAdvisor.fullName} (${assignedAdvisor.roleTitle})`
+                : "Mesa de Corretaje Institucional SIGI Coldwell Banker México"}
+            </p>
+            <p className="mt-0.5">
+              Cumplimiento Normativo Oficial{" "}
+              <strong className="text-[#0B1F3A]">NOM-247-SE-2021</strong> y Ley
+              Federal de Protección de Datos Personales (LFPDPPP).
+            </p>
+          </div>
+          <div className="text-right shrink-0">
+            <p className="font-bold text-[#0B1F3A]">
+              {assignedAdvisor?.phone || "+52 55 8920 1200"}
+            </p>
+            <p>coldwellbanker.com.mx • Certificación AMPI</p>
+          </div>
         </div>
       </section>
 
@@ -626,7 +1572,7 @@ export default function CompradorPage() {
             <div className="inline-flex items-center p-1 rounded-2xl bg-white border border-slate-200/90 shadow-xs">
               <button
                 type="button"
-                onClick={() => setOperationMode("comprar")}
+                onClick={() => handleSwitchOperationMode("comprar")}
                 className={`px-4 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
                   operationMode === "comprar"
                     ? "bg-[#0B1F3A] text-white shadow-xs"
@@ -637,7 +1583,7 @@ export default function CompradorPage() {
               </button>
               <button
                 type="button"
-                onClick={() => setOperationMode("rentar")}
+                onClick={() => handleSwitchOperationMode("rentar")}
                 className={`px-4 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
                   operationMode === "rentar"
                     ? "bg-[#0B1F3A] text-white shadow-xs"
@@ -657,55 +1603,97 @@ export default function CompradorPage() {
 
         {/* Barra de Filtros Interactiva conectada a /api/ai-match */}
         <section className="bg-white rounded-3xl p-4 sm:p-5 shadow-sm border border-slate-200/80 grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-          {/* Zona de Interés */}
+          {/* Zona de Interés con detección automática de ubicación */}
           <div className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-100 pb-3 md:pb-0 md:pr-4">
-            <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-1">
-              Zona de Interés
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
+                Zona de Interés
+              </label>
+              {detectedGeoCity && (
+                <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                  📍 Detectado: {detectedGeoCity}
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               <MapPin className="w-4 h-4 text-[#0B1F3A] shrink-0" />
               <select
                 value={zoneFilter}
-                onChange={(e) => setZoneFilter(e.target.value)}
+                onChange={(e) => {
+                  setZoneFilter(e.target.value);
+                  setUserChangedZone(true);
+                }}
                 aria-label="Zona de Interés"
                 className="w-full bg-transparent text-xs sm:text-sm font-bold text-[#0B1F3A] focus:outline-none cursor-pointer"
               >
+                {customDetectedZoneOption && (
+                  <option value={customDetectedZoneOption}>
+                    {customDetectedZoneOption} (Ubicación detectada)
+                  </option>
+                )}
                 <option value="Juriquilla, Querétaro">
                   Juriquilla, Querétaro
+                  {detectedGeoCity &&
+                  resolveCanonicalCityKey(detectedGeoCity) === "queretaro"
+                    ? ` (📍 ${detectedGeoCity})`
+                    : ""}
                 </option>
-                <option value="San Pedro Garza García, N.L.">
-                  San Pedro Garza García, N.L.
+                <option value="Monterrey">
+                  Monterrey
+                  {detectedGeoCity &&
+                  resolveCanonicalCityKey(detectedGeoCity) === "monterrey"
+                    ? ` (📍 ${detectedGeoCity})`
+                    : ""}
                 </option>
-                <option value="Polanco IV Sección, CDMX">
-                  Polanco IV Sección, CDMX
+                <option value="CDMX">
+                  CDMX
+                  {detectedGeoCity &&
+                  resolveCanonicalCityKey(detectedGeoCity) === "cdmx"
+                    ? ` (📍 ${detectedGeoCity})`
+                    : ""}
                 </option>
                 <option value="Riviera Maya & Tulum">
                   Riviera Maya &amp; Tulum
+                  {detectedGeoCity &&
+                  resolveCanonicalCityKey(detectedGeoCity) === "riviera_maya"
+                    ? ` (📍 ${detectedGeoCity})`
+                    : ""}
                 </option>
               </select>
             </div>
           </div>
 
-          {/* Slider de Presupuesto Máximo */}
+          {/* Slider de Presupuesto Máximo con rangos dinámicos según Rentar o Comprar */}
           <div className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-100 pb-3 md:pb-0 md:px-2">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
                 Presupuesto Máximo
               </span>
               <span className="text-xs font-extrabold text-[#0B1F3A]">
-                ${maxBudgetMillions.toFixed(1)}M MXN
+                {formatBudgetSliderLabel(maxBudgetMXN)}
               </span>
             </div>
             <input
               type="range"
-              min={4.0}
-              max={45.0}
-              step={0.5}
-              value={maxBudgetMillions}
-              onChange={(e) => setMaxBudgetMillions(parseFloat(e.target.value))}
+              min={operationMode === "rentar" ? 7500 : 1800000}
+              max={operationMode === "rentar" ? 45000000 : 120000000}
+              step={operationMode === "rentar" ? 2500 : 100000}
+              value={maxBudgetMXN}
+              onChange={(e) => {
+                setMaxBudgetMXN(Number(e.target.value));
+                setUserChangedBudget(true);
+              }}
               aria-label="Presupuesto Máximo"
               className="w-full accent-[#0B1F3A] cursor-pointer h-1.5 bg-slate-200 rounded-lg"
             />
+            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 mt-1">
+              <span>
+                {operationMode === "rentar" ? "$7,500.00 MXN" : "$1.8M MXN"}
+              </span>
+              <span>
+                {operationMode === "rentar" ? "$45.0M MXN" : "$120M MXN"}
+              </span>
+            </div>
           </div>
 
           {/* Selector de Tipología */}
@@ -715,7 +1703,10 @@ export default function CompradorPage() {
             </label>
             <select
               value={typologyFilter}
-              onChange={(e) => setTypologyFilter(e.target.value)}
+              onChange={(e) => {
+                setTypologyFilter(e.target.value);
+                setUserChangedTypology(true);
+              }}
               aria-label="Tipología Patrimonial"
               className="w-full bg-transparent text-xs sm:text-sm font-bold text-[#0B1F3A] focus:outline-none cursor-pointer"
             >
@@ -729,15 +1720,20 @@ export default function CompradorPage() {
             </select>
           </div>
 
-          {/* Botón oscuro Filtros conectado a /api/ai-match */}
+          {/* Botón oscuro Filtros con indicador numérico de filtros activos */}
           <div className="md:col-span-1 flex justify-end">
             <button
               type="button"
-              onClick={() => void runAiMatchEngine({ manualButton: true })}
-              className="w-full md:w-auto px-4 py-3 rounded-2xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              onClick={handleOpenFiltersModal}
+              className="relative w-full md:w-auto px-4 py-3 rounded-2xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <SlidersHorizontal className="w-4 h-4" />
               <span>{isCalculatingAi ? "IA..." : "Filtros"}</span>
+              {activeAdvancedFiltersCount > 0 && (
+                <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-[#10B981] text-white text-[10px] font-extrabold shadow-xs">
+                  {activeAdvancedFiltersCount}
+                </span>
+              )}
             </button>
           </div>
         </section>
@@ -758,668 +1754,1171 @@ export default function CompradorPage() {
           </div>
         )}
 
-        {/* Carrusel Tipo Acordeón Horizontal: FEATURED DEALS CAROUSEL */}
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-[11px] font-extrabold tracking-[0.16em] text-sky-700 uppercase">
-                FEATURED DEALS CAROUSEL
-              </p>
-              <h2 className="text-lg sm:text-xl font-extrabold text-[#0B1F3A]">
-                Propiedades que más te podrían interesar
+        <div
+          id="featured-deals-carousel"
+          ref={carouselSectionRef}
+          className="scroll-mt-24 space-y-4"
+        >
+          {searchQuery.trim().length > 0 && filteredProperties.length > 0 && (
+            <div className="p-3.5 rounded-2xl bg-sky-50 border border-sky-200 text-xs font-bold text-[#0B1F3A] flex flex-wrap items-center justify-between gap-3">
+              <span className="flex items-center gap-2">
+                <Search className="w-4 h-4 text-sky-700 shrink-0" />
+                <span>
+                  Se encontraron{" "}
+                  <strong>{filteredProperties.length}</strong>{" "}
+                  {filteredProperties.length === 1
+                    ? "propiedad coincidente"
+                    : "propiedades coincidentes"}{" "}
+                  en las 4 sedes para &ldquo;{searchQuery.trim()}&rdquo;
+                  {filteredProperties.length > 4
+                    ? " (mostrando las 4 mejores en el carrusel)."
+                    : "."}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="px-3.5 py-1.5 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold shrink-0 transition-colors cursor-pointer"
+              >
+                Limpiar búsqueda
+              </button>
+            </div>
+          )}
+
+          {/* Estado vacío cuando ninguna propiedad coincide con la búsqueda o filtros */}
+          {carouselProperties.length === 0 ? (
+            <section className="bg-white rounded-3xl border border-slate-200/80 shadow-sm p-10 sm:p-14 text-center max-w-2xl mx-auto my-6 space-y-4">
+              <div className="w-16 h-16 rounded-2xl bg-[#F4F7FB] border border-slate-200 text-[#0B1F3A] flex items-center justify-center mx-auto">
+                <SearchX className="w-8 h-8 text-sky-700" />
+              </div>
+              <h2 className="text-xl sm:text-2xl font-extrabold text-[#0B1F3A]">
+                Ninguna propiedad cumplió con tus necesidades
               </h2>
-            </div>
-            <span className="text-xs text-slate-500 font-medium">
-              Haz clic en cualquier tarjeta vertical para expandir su vista y
-              actualizar su análisis algorítmico
-            </span>
-          </div>
-
-          <div className="flex flex-col lg:flex-row gap-4 min-h-[440px]">
-            {carouselProperties.map((prop) => {
-              const isExpanded = prop.id === activeProperty?.id;
-              const isFav = !!favorites[prop.id];
-
-              if (isExpanded) {
-                return (
-                  <div
-                    key={prop.id}
-                    className="lg:flex-[3.2] relative rounded-3xl overflow-hidden shadow-xl bg-[#0B1F3A] min-h-[420px] flex flex-col justify-between transition-all duration-500 border border-slate-200/40"
-                  >
-                    <img
-                      src={prop.image}
-                      alt={prop.title}
-                      className="absolute inset-0 w-full h-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-[#061326] via-[#0B1F3A]/45 to-black/20" />
-
-                    {/* Top badges & Botón de Corazón Favoritos */}
-                    <div className="relative z-10 p-6 flex items-center justify-between gap-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-500 text-white text-xs font-extrabold tracking-wide shadow-sm">
-                          • {prop.aiMatchDisplay} MATCH PREFERENCIAS
-                        </span>
-                        <span className="inline-flex items-center px-3.5 py-1.5 rounded-full bg-[#0B1F3A]/85 backdrop-blur-md border border-white/20 text-white text-xs font-bold">
-                          Exclusiva SIGI
-                        </span>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={(e) => toggleFavorite(prop.id, e)}
-                        aria-label="Guardar en Favoritos"
-                        className={`w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center transition-all cursor-pointer ${
-                          isFav
-                            ? "bg-rose-500 text-white shadow-md"
-                            : "bg-white/20 text-white hover:bg-white/35"
-                        }`}
-                      >
-                        <Heart
-                          className={`w-5 h-5 ${isFav ? "fill-current" : ""}`}
-                        />
-                      </button>
-                    </div>
-
-                    {/* Información Inferior de la Propiedad Expandida */}
-                    <div className="relative z-10 p-6 sm:p-8 text-white">
-                      <p className="text-xs font-bold text-sky-300 uppercase tracking-wider">
-                        Folio {prop.folio} • {prop.location}
-                      </p>
-                      <h3 className="text-2xl sm:text-3xl font-extrabold mt-1">
-                        {prop.title}
-                      </h3>
-
-                      <div className="mt-3 space-y-1">
-                        <p className="text-[10px] font-extrabold uppercase tracking-widest text-sky-300">
-                          {operationMode === "rentar"
-                            ? "RENTA MENSUAL"
-                            : "PRECIO DE VENTA"}
-                        </p>
-                        <div className="flex flex-wrap items-baseline gap-3">
-                          <span className="text-2xl sm:text-3xl font-extrabold text-white">
-                            {operationMode === "rentar" && prop.rentPriceDisplay
-                              ? `${prop.rentPriceDisplay} MXN/mes`
-                              : prop.salePriceDisplay.includes("MXN")
-                              ? prop.salePriceDisplay
-                              : `${prop.salePriceDisplay} MXN`}
-                          </span>
-                        </div>
-                        {prop.rentPriceDisplay && (
-                          <p className="text-xs sm:text-sm font-semibold text-sky-200">
-                            o Renta: {prop.rentPriceDisplay} MXN/mes
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Métricas y Botón Blanco Agendar Visita */}
-                      <div className="mt-5 pt-4 border-t border-white/15 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                        <div className="flex flex-wrap items-center gap-3 text-xs sm:text-sm font-semibold text-slate-100">
-                          <span className="inline-flex items-center gap-1.5">
-                            <BedDouble className="w-4 h-4 text-sky-300" />
-                            {prop.bedroomsDisplay}
-                          </span>
-                          <span>|</span>
-                          <span className="inline-flex items-center gap-1.5">
-                            <Bath className="w-4 h-4 text-sky-300" />
-                            {prop.bathroomsDisplay}
-                          </span>
-                          <span>|</span>
-                          <span className="inline-flex items-center gap-1.5">
-                            <Car className="w-4 h-4 text-sky-300" />
-                            {prop.parkingDisplay || "2 Autos"}
-                          </span>
-                          <span>|</span>
-                          <span className="inline-flex items-center gap-1.5">
-                            <Maximize2 className="w-4 h-4 text-sky-300" />
-                            {prop.constructionAreaDisplay} Const.
-                          </span>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={(e) => openScheduleModal(prop.title, e)}
-                          className="px-5 py-3 rounded-xl bg-white hover:bg-slate-100 text-[#0B1F3A] font-extrabold text-xs sm:text-sm shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer shrink-0"
-                        >
-                          <Calendar className="w-4 h-4 text-[#0B1F3A]" />
-                          <span>Agendar Visita</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              // Tarjetas verticales colapsadas con nombre y precio rotados verticalmente (-rotate-90 whitespace-nowrap)
-              return (
-                <div
-                  key={prop.id}
-                  onClick={() => setExpandedId(prop.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      setExpandedId(prop.id);
-                    }
-                  }}
-                  className="lg:flex-1 relative rounded-3xl overflow-hidden shadow-md bg-[#0B1F3A] min-h-[180px] lg:min-h-[420px] flex flex-col justify-between p-4 cursor-pointer group hover:ring-2 hover:ring-sky-400 transition-all duration-300"
-                >
-                  <img
-                    src={prop.image}
-                    alt={prop.title}
-                    className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-[#051122]/90 via-[#0B1F3A]/55 to-black/25" />
-
-                  {/* Parte superior: badge de % Match y botón circular de corazón */}
-                  <div className="relative z-10 flex items-center justify-between gap-1">
-                    <span className="px-2.5 py-1 rounded-full bg-emerald-500/95 text-white text-[11px] font-extrabold">
-                      {prop.aiMatchDisplay} Match
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(e) => toggleFavorite(prop.id, e)}
-                      aria-label="Favorito"
-                      className="w-8 h-8 rounded-full bg-white/20 hover:bg-white/35 text-white flex items-center justify-center shrink-0"
-                    >
-                      <Heart
-                        className={`w-4 h-4 ${
-                          isFav ? "fill-rose-500 text-rose-500" : ""
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  {/* Cuerpo central con nombre y precio rotados verticalmente en texto blanco limpio */}
-                  <div className="relative z-10 flex-1 flex items-center justify-center py-6">
-                    <span className="-rotate-90 whitespace-nowrap text-sm sm:text-base font-extrabold tracking-wide text-white drop-shadow-sm">
-                      {prop.title} •{" "}
-                      {operationMode === "rentar" && prop.rentPriceDisplay
-                        ? `${prop.rentPriceDisplay}/mes`
-                        : prop.salePriceDisplay}
-                    </span>
-                  </div>
-
-                  <div className="relative z-10 h-2" />
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        {/* Bloque Inferior Dinámico: FICHA TÉCNICA & ANÁLISIS ALGORÍTMICO */}
-        <section className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
-            <h2 className="text-sm sm:text-base font-extrabold tracking-wider text-[#0B1F3A] uppercase">
-              FICHA TÉCNICA &amp; ANÁLISIS ALGORÍTMICO (FOLIO SIGI:{" "}
-              {activeProperty?.folio || "MX-QRO-2025-089"})
-            </h2>
-            <span className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
-              Auditoría Jurídica &amp; Valuación Verificada •{" "}
-              {activeProperty?.title}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Columna Izquierda (7 cols) */}
-            <div className="lg:col-span-7 space-y-6">
-              {/* 4 Tarjetas Métricas Dinámicas según la tarjeta seleccionada */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-                <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
-                  <p className="text-lg sm:text-xl font-extrabold text-[#0B1F3A]">
-                    {activeProperty?.landAreaDisplay || "315 m²"}
-                  </p>
-                  <p className="text-xs font-bold text-slate-700 mt-0.5">
-                    Superficie Terreno
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Frente de{" "}
-                    {Math.max(
-                      12,
-                      Math.round((activeProperty?.landArea || 315) / 21.7)
-                    )}
-                    .5 m
-                  </p>
-                </div>
-
-                <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
-                  <p className="text-lg sm:text-xl font-extrabold text-[#0B1F3A]">
-                    {activeProperty?.constructionAreaDisplay || "280 m²"}
-                  </p>
-                  <p className="text-xs font-bold text-slate-700 mt-0.5">
-                    Construcción
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    {activeProperty?.typology
-                      ?.toLowerCase()
-                      .includes("penthouse")
-                      ? "Sky Level + Terraza"
-                      : "2 Niveles + Roof"}
-                  </p>
-                </div>
-
-                <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
-                  <p className="text-lg sm:text-xl font-extrabold text-emerald-600">
-                    {activeProperty?.plusvalia || "+11.8%"}
-                  </p>
-                  <p className="text-xs font-bold text-slate-700 mt-0.5">
-                    Plusvalía Anual Proy.
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-                    {activeProperty?.zone || "Zona Querétaro Nte."}
-                  </p>
-                </div>
-
-                <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
-                  <p className="text-lg sm:text-xl font-extrabold text-sky-700">
-                    {activeProperty?.capRate || "8.8% Anual"}
-                  </p>
-                  <p className="text-xs font-bold text-slate-700 mt-0.5">
-                    Cap Rate Renta
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Estimación Certificada
-                  </p>
-                </div>
-              </div>
-
-              {/* 2 Fotografías de interiores + Tarjeta interactiva Tour Virtual 360° Matterport 4K Activo */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div
-                  onClick={() => {
-                    setSelectedTourAreaId("estancia");
-                    setTourModalOpen(true);
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      setSelectedTourAreaId("estancia");
-                      setTourModalOpen(true);
-                    }
-                  }}
-                  className="relative rounded-2xl overflow-hidden h-48 shadow-xs group cursor-pointer"
-                >
-                  <img
-                    src="https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?auto=format&fit=crop&w=800&q=80"
-                    alt="Estancia principal doble altura"
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent flex items-end p-3">
-                    <span className="text-xs font-bold text-white">
-                      Estancia &amp; Doble Altura
-                    </span>
-                  </div>
-                </div>
-
-                <div
-                  onClick={() => {
-                    setSelectedTourAreaId("cocina");
-                    setTourModalOpen(true);
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      setSelectedTourAreaId("cocina");
-                      setTourModalOpen(true);
-                    }
-                  }}
-                  className="relative rounded-2xl overflow-hidden h-48 shadow-xs group cursor-pointer"
-                >
-                  <img
-                    src="https://images.unsplash.com/photo-1556911220-bff31c812dba?auto=format&fit=crop&w=800&q=80"
-                    alt="Cocina de autor con isla de cuarzo"
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent flex items-end p-3">
-                    <span className="text-xs font-bold text-white">
-                      Cocina de Autor &amp; Cuarzo
-                    </span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setTourModalOpen(true)}
-                  className="relative rounded-2xl overflow-hidden h-48 bg-[#0B1F3A] text-white p-5 flex flex-col justify-between text-left shadow-md hover:bg-[#122e55] transition-all cursor-pointer group"
-                >
-                  <div className="w-10 h-10 rounded-xl bg-sky-400/20 border border-sky-300/30 flex items-center justify-center text-sky-300 group-hover:scale-110 transition-transform">
-                    <Compass className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-emerald-300">
-                      <Eye className="w-3 h-3" /> Inmersivo
-                    </span>
-                    <p className="text-sm font-extrabold leading-snug mt-1">
-                      Tour Virtual 360° Matterport 4K Activo
-                    </p>
-                    <p className="text-[11px] text-sky-200 mt-1 underline">
-                      Explorar recorrido digital →
-                    </p>
-                  </div>
-                </button>
-              </div>
-
-              {/* Badges de AMENIDADES & PRIVILEGIOS RESIDENCIALES */}
-              <div className="bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs space-y-3">
-                <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
-                  AMENIDADES &amp; PRIVILEGIOS RESIDENCIALES
-                </h3>
-                <div className="flex flex-wrap gap-2.5">
-                  {[
-                    "Acceso Controlado 24/7",
-                    "Alberca Climatizada & Deck",
-                    "Paneles Solares Integrados",
-                    "Parque Lineal Privado",
-                    "Cargador Eléctrico Nivel 2",
-                  ].map((amenity) => (
-                    <span
-                      key={amenity}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-bold text-[#0B1F3A]"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                      {amenity}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              {/* Mapa Visual UBICACIÓN ESTRATÉGICA dinámico */}
-              <div className="bg-white rounded-3xl p-5 border border-slate-200/80 shadow-xs">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                  <div className="flex items-center gap-2">
-                    <MapPin className="w-4 h-4 text-[#0B1F3A]" />
-                    <h3 className="text-xs sm:text-sm font-extrabold text-[#0B1F3A]">
-                      UBICACIÓN ESTRATÉGICA: {locationMeta.corridor}
-                    </h3>
-                  </div>
-                  <span className="text-[11px] font-semibold text-slate-500">
-                    {activeProperty?.location}
-                  </span>
-                </div>
-
-                <div className="relative h-40 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center">
-                  <div
-                    className="absolute inset-0 opacity-35"
-                    style={{
-                      backgroundImage:
-                        "radial-gradient(#0B1F3A 1px, transparent 1px), linear-gradient(to right, #cbd5e1 1px, transparent 1px), linear-gradient(to bottom, #cbd5e1 1px, transparent 1px)",
-                      backgroundSize: "20px 20px, 40px 40px, 40px 40px",
-                    }}
-                  />
-                  <div className="relative z-10 px-4 py-2.5 rounded-2xl bg-[#0B1F3A] text-white shadow-lg flex items-center gap-2.5">
-                    <span className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
-                    <div className="text-xs">
-                      <p className="font-extrabold">{activeProperty?.title}</p>
-                      <p className="text-[10px] text-sky-300">
-                        {locationMeta.coords}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Columna Derecha (5 cols) */}
-            <div className="lg:col-span-5 space-y-5">
-              {/* Card 1: DESGLOSE DE COMPATIBILIDAD conectado en vivo a /api/ai-match */}
-              <div className="bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs space-y-5">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
-                    DESGLOSE DE COMPATIBILIDAD
-                  </h3>
-                  <TrendingUp className="w-4 h-4 text-emerald-600" />
-                </div>
-
-                {/* Aro verde dinámico con el % de afinidad de la propiedad activa */}
-                <div className="flex items-center gap-4 p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200/70">
-                  <div className="w-16 h-16 rounded-full border-4 border-emerald-500 flex items-center justify-center bg-white shrink-0 shadow-xs">
-                    <span className="text-lg font-extrabold text-emerald-700">
-                      {activeBreakdown.ai_match_score}%
-                    </span>
-                  </div>
-                  <div>
-                    <p className="text-sm font-extrabold text-[#0B1F3A]">
-                      {activeBreakdown.alignmentHeadline}
-                    </p>
-                    <p className="text-xs text-slate-600 mt-0.5">
-                      {activeBreakdown.alignmentDescription}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Barras de progreso dinámicas de los 3 criterios */}
-                <div className="space-y-3.5 text-xs">
-                  <div>
-                    <div className="flex justify-between font-bold text-slate-700 mb-1">
-                      <span>Rango Presupuestal</span>
-                      <span className="text-emerald-700">
-                        {activeBreakdown.rangoPresupuestal}% OK
-                      </span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                        style={{
-                          width: `${activeBreakdown.rangoPresupuestal}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between font-bold text-slate-700 mb-1">
-                      <span>Espacio para Home Office &amp; Fam</span>
-                      <span className="text-emerald-700">
-                        {activeBreakdown.espacioHomeOfficeFam}% OK
-                      </span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                        style={{
-                          width: `${activeBreakdown.espacioHomeOfficeFam}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between font-bold text-slate-700 mb-1">
-                      <span>Distancia a Colegios Bilingües</span>
-                      <span className="text-emerald-700">
-                        {activeBreakdown.distanciaColegiosBilingues}% OK
-                      </span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                        style={{
-                          width: `${activeBreakdown.distanciaColegiosBilingues}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 2: ASESOR INMOBILIARIO CERTIFICADO */}
-              <div className="bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs space-y-4">
-                <p className="text-[11px] font-extrabold uppercase tracking-wider text-sky-700">
-                  ASESOR INMOBILIARIO CERTIFICADO
-                </p>
-
-                <div className="flex items-center gap-3.5">
-                  <div className="w-12 h-12 rounded-2xl bg-[#0B1F3A] text-white font-extrabold text-sm flex items-center justify-center shrink-0">
-                    MV
-                  </div>
-                  <div>
-                    <h4 className="text-sm sm:text-base font-extrabold text-[#0B1F3A]">
-                      Lic. Mariana De la Vega
-                    </h4>
-                    <p className="text-xs text-slate-500 font-medium">
-                      Senior Luxury Specialist • Certificación AMPI
-                    </p>
-                  </div>
-                </div>
-
-                {advisorToast && (
-                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium flex items-center justify-between gap-2">
-                    <span>{advisorToast}</span>
-                    <button
-                      type="button"
-                      onClick={() => setAdvisorToast(null)}
-                      className="text-emerald-700 font-bold hover:underline cursor-pointer"
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
-
-                <div className="space-y-2.5 pt-1">
+              <p className="text-xs sm:text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
+                Intenta ampliar tu rango de presupuesto, cambiar la zona o
+                restablecer los filtros aplicados.
+              </p>
+              <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                {searchQuery.trim().length > 0 && (
                   <button
                     type="button"
-                    onClick={() =>
-                      openScheduleModal(
-                        activeProperty?.title ||
-                          "Residencia Cumbres de Juriquilla"
-                      )
-                    }
-                    className="w-full py-3 px-4 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                    onClick={() => setSearchQuery("")}
+                    className="px-6 py-3 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs sm:text-sm font-extrabold shadow-md transition-colors cursor-pointer"
                   >
-                    <Calendar className="w-4 h-4" />
-                    <span>Agendar Cita Privada</span>
+                    Limpiar búsqueda
                   </button>
-
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <button
-                      type="button"
-                      onClick={handleOpenWhatsApp}
-                      className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      <MessageCircle className="w-4 h-4" />
-                      <span>WhatsApp</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handlePrintFichaPdf}
-                      className="py-2.5 px-3 rounded-xl border border-slate-200 hover:bg-slate-50 text-[#0B1F3A] text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      <FileText className="w-4 h-4" />
-                      <span>Ficha PDF</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 3: Azul Claro Alerta Automática de Match */}
-              <div className="rounded-3xl bg-sky-50 border border-sky-200/80 p-6 space-y-3">
-                <div className="flex items-center gap-2 text-[#0B1F3A]">
-                  <BellRing className="w-5 h-5 text-sky-600" />
-                  <h4 className="text-sm font-extrabold">
-                    Alerta Automática de Match
-                  </h4>
-                </div>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Recibe notificación prioritaria vía WhatsApp cuando ingrese al
-                  MLS privado una propiedad con compatibilidad superior al 90%.
-                </p>
-
-                {alertActivated && alertConfirmationMsg && (
-                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-bold flex items-start gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <span>{alertConfirmationMsg}</span>
-                  </div>
                 )}
-
                 <button
                   type="button"
-                  onClick={() => void handleToggleRealtimeAlert()}
-                  className={`w-full py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
-                    alertActivated
-                      ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                      : "bg-[#0B1F3A] hover:bg-[#143159] text-white"
-                  }`}
+                  onClick={handleResetAllFilters}
+                  className="px-6 py-3 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs sm:text-sm font-extrabold shadow-md transition-colors cursor-pointer"
                 >
-                  {alertActivated
-                    ? "✓ Alerta en Tiempo Real Activada"
-                    : "Activar Alerta en Tiempo Real"}
+                  Restablecer filtros
                 </button>
               </div>
-            </div>
-          </div>
-        </section>
+            </section>
+          ) : (
+            <>
+              {/* Carrusel Tipo Acordeón Horizontal: FEATURED DEALS CAROUSEL */}
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-[11px] font-extrabold tracking-[0.16em] text-sky-700 uppercase">
+                    FEATURED DEALS CAROUSEL
+                  </p>
+                  <h2 className="text-lg sm:text-xl font-extrabold text-[#0B1F3A]">
+                    Propiedades que más te podrían interesar
+                  </h2>
+                </div>
+                <span className="text-xs text-slate-500 font-medium">
+                  Haz clic en cualquier tarjeta vertical para expandir su vista
+                  y actualizar su análisis algorítmico
+                </span>
+              </div>
+
+              <div className="flex flex-col lg:flex-row gap-4 min-h-[440px]">
+                {carouselProperties.map((prop) => {
+                  const isExpanded = prop.id === activeProperty?.id;
+                  const isFav = (favoritePropertyIds || []).includes(prop.id);
+
+                  if (isExpanded) {
+                    return (
+                      <div
+                        key={prop.id}
+                        className="lg:flex-[3.2] relative rounded-3xl overflow-hidden shadow-xl bg-[#0B1F3A] min-h-[420px] flex flex-col justify-between transition-all duration-500 border border-slate-200/40"
+                      >
+                        <img
+                          src={prop.image}
+                          alt={prop.title}
+                          className="absolute inset-0 w-full h-full object-cover"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-[#061326]/95 via-[#0B1F3A]/50 to-black/20" />
+
+                        {/* Top badges & Botón de Corazón Favoritos */}
+                        <div className="relative z-10 p-5 sm:p-6 flex items-center justify-between gap-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-500 text-white text-xs font-extrabold tracking-wide shadow-sm">
+                              • {prop.aiMatchDisplay} MATCH PREFERENCIAS
+                            </span>
+                            <span className="inline-flex items-center px-3.5 py-1.5 rounded-full bg-[#0B1F3A]/85 backdrop-blur-md border border-white/20 text-white text-xs font-bold">
+                              Exclusiva SIGI
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={(e) => toggleFavorite(prop.id, e)}
+                            aria-label="Guardar en Favoritos"
+                            className={`w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                              isFav
+                                ? "bg-rose-500 text-white shadow-md"
+                                : "bg-white/20 text-white hover:bg-white/35"
+                            }`}
+                          >
+                            <Heart
+                              className={`w-5 h-5 ${
+                                isFav ? "fill-current" : ""
+                              }`}
+                            />
+                          </button>
+                        </div>
+
+                        {/* Información Inferior de la Propiedad Expandida con contenedor seguro y sin desbordamientos */}
+                        <div className="relative z-10 p-5 sm:p-7 text-white w-full max-w-full overflow-hidden">
+                          <p className="text-[11px] sm:text-xs font-bold text-sky-300 uppercase tracking-wider max-w-full break-words line-clamp-2">
+                            Folio {prop.folio} • {prop.location}
+                          </p>
+                          <h3 className="text-lg sm:text-xl lg:text-2xl font-extrabold mt-1 leading-snug max-w-full break-words line-clamp-2">
+                            {prop.title}
+                          </h3>
+
+                          <div className="mt-2.5 space-y-1">
+                            <p className="text-[10px] font-extrabold uppercase tracking-widest text-sky-300">
+                              {operationMode === "rentar"
+                                ? "RENTA MENSUAL"
+                                : "PRECIO DE VENTA"}
+                            </p>
+                            <div className="flex flex-wrap items-baseline gap-3">
+                              <span className="text-xl sm:text-2xl lg:text-3xl font-extrabold text-white">
+                                {operationMode === "rentar" &&
+                                prop.rentPriceDisplay
+                                  ? `${prop.rentPriceDisplay} MXN/mes`
+                                  : prop.salePriceDisplay.includes("MXN")
+                                  ? prop.salePriceDisplay
+                                  : `${prop.salePriceDisplay} MXN`}
+                              </span>
+                            </div>
+                            {prop.rentPriceDisplay && (
+                              <p className="text-xs font-semibold text-sky-200">
+                                o Renta: {prop.rentPriceDisplay} MXN/mes
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Métricas y Botón Blanco Agendar Visita */}
+                          <div className="mt-4 pt-3.5 border-t border-white/15 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="flex flex-wrap items-center gap-2.5 text-xs font-semibold text-slate-100">
+                              <span className="inline-flex items-center gap-1">
+                                <BedDouble className="w-3.5 h-3.5 text-sky-300" />
+                                {prop.bedroomsDisplay}
+                              </span>
+                              <span>|</span>
+                              <span className="inline-flex items-center gap-1">
+                                <Bath className="w-3.5 h-3.5 text-sky-300" />
+                                {prop.bathroomsDisplay}
+                              </span>
+                              <span>|</span>
+                              <span className="inline-flex items-center gap-1">
+                                <Car className="w-3.5 h-3.5 text-sky-300" />
+                                {prop.parkingDisplay || "2 Autos"}
+                              </span>
+                              <span>|</span>
+                              <span className="inline-flex items-center gap-1">
+                                <Maximize2 className="w-3.5 h-3.5 text-sky-300" />
+                                {prop.constructionAreaDisplay} Const.
+                              </span>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={(e) => openScheduleModal(prop.title, e)}
+                              className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-[#0B1F3A] font-extrabold text-xs sm:text-sm shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer shrink-0"
+                            >
+                              <Calendar className="w-4 h-4 text-[#0B1F3A]" />
+                              <span>Agendar Visita</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Tarjetas verticales colapsadas con contenedor interior seguro y line-clamp-2 para evitar desbordamientos
+                  return (
+                    <div
+                      key={prop.id}
+                      onClick={() => setExpandedId(prop.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          setExpandedId(prop.id);
+                        }
+                      }}
+                      className="lg:flex-1 relative rounded-3xl overflow-hidden shadow-md bg-[#0B1F3A] min-h-[200px] lg:min-h-[420px] flex flex-col justify-between p-4 cursor-pointer group hover:ring-2 hover:ring-sky-400 transition-all duration-300"
+                    >
+                      <img
+                        src={prop.image}
+                        alt={prop.title}
+                        className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-[#051122]/95 via-[#0B1F3A]/55 to-black/25" />
+
+                      {/* Parte superior: badge de % Match y botón circular de corazón */}
+                      <div className="relative z-10 flex items-center justify-between gap-1">
+                        <span className="px-2.5 py-1 rounded-full bg-emerald-500/95 text-white text-[11px] font-extrabold">
+                          {prop.aiMatchDisplay} Match
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => toggleFavorite(prop.id, e)}
+                          aria-label="Favorito"
+                          className="w-8 h-8 rounded-full bg-white/20 hover:bg-white/35 text-white flex items-center justify-center shrink-0"
+                        >
+                          <Heart
+                            className={`w-4 h-4 ${
+                              isFav ? "fill-rose-500 text-rose-500" : ""
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Contenedor inferior con padding seguro, overflow-hidden y line-clamp-2 */}
+                      <div className="relative z-10 w-full max-w-full overflow-hidden p-3.5 rounded-2xl bg-slate-950/50 backdrop-blur-xs border border-white/10 space-y-1">
+                        <h4 className="text-sm sm:text-base lg:text-lg font-extrabold leading-snug text-white max-w-full break-words line-clamp-2 drop-shadow-sm">
+                          {prop.title}
+                        </h4>
+                        <p className="text-xs sm:text-sm font-extrabold text-sky-300 max-w-full break-words truncate">
+                          {operationMode === "rentar" && prop.rentPriceDisplay
+                            ? `${prop.rentPriceDisplay} MXN/mes`
+                            : prop.salePriceDisplay}
+                        </p>
+                        <p className="text-[11px] text-slate-200 max-w-full break-words line-clamp-2">
+                          {prop.zone || prop.location}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Bloque Inferior Dinámico: FICHA TÉCNICA & ANÁLISIS ALGORÍTMICO */}
+            <section className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
+                <h2 className="text-sm sm:text-base font-extrabold tracking-wider text-[#0B1F3A] uppercase">
+                  FICHA TÉCNICA &amp; ANÁLISIS ALGORÍTMICO (FOLIO SIGI:{" "}
+                  {activeProperty?.folio || "MX-QRO-2025-089"})
+                </h2>
+                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
+                  Auditoría Jurídica &amp; Valuación Verificada •{" "}
+                  {activeProperty?.title}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Columna Izquierda (7 cols) */}
+                <div className="lg:col-span-7 space-y-6">
+                  {/* 4 Tarjetas Métricas Dinámicas según la tarjeta seleccionada */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+                      <p className="text-lg sm:text-xl font-extrabold text-[#0B1F3A]">
+                        {activeProperty?.landAreaDisplay || "315 m²"}
+                      </p>
+                      <p className="text-xs font-bold text-slate-700 mt-0.5">
+                        Superficie Terreno
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Frente de{" "}
+                        {Math.max(
+                          12,
+                          Math.round((activeProperty?.landArea || 315) / 21.7)
+                        )}
+                        .5 m
+                      </p>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+                      <p className="text-lg sm:text-xl font-extrabold text-[#0B1F3A]">
+                        {activeProperty?.constructionAreaDisplay || "280 m²"}
+                      </p>
+                      <p className="text-xs font-bold text-slate-700 mt-0.5">
+                        Construcción
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {activeProperty?.typology
+                          ?.toLowerCase()
+                          .includes("penthouse")
+                          ? "Sky Level + Terraza"
+                          : "2 Niveles + Roof"}
+                      </p>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+                      <p className="text-lg sm:text-xl font-extrabold text-emerald-600">
+                        {activeProperty?.plusvalia || "+11.8%"}
+                      </p>
+                      <p className="text-xs font-bold text-slate-700 mt-0.5">
+                        Plusvalía Anual Proy.
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                        {activeProperty?.zone || "Zona Querétaro Nte."}
+                      </p>
+                    </div>
+
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs">
+                      <p className="text-lg sm:text-xl font-extrabold text-sky-700">
+                        {activeProperty?.capRate || "8.8% Anual"}
+                      </p>
+                      <p className="text-xs font-bold text-slate-700 mt-0.5">
+                        Cap Rate Renta
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Estimación Certificada
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* 2 Fotografías de interiores + Tarjeta interactiva Tour Virtual 360° Matterport 4K Activo */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div
+                      onClick={() => {
+                        setSelectedTourAreaId("estancia");
+                        setTourModalOpen(true);
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          setSelectedTourAreaId("estancia");
+                          setTourModalOpen(true);
+                        }
+                      }}
+                      className="relative rounded-2xl overflow-hidden h-48 shadow-xs group cursor-pointer"
+                    >
+                      <img
+                        src="https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?auto=format&fit=crop&w=800&q=80"
+                        alt="Estancia principal doble altura"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent flex items-end p-3">
+                        <span className="text-xs font-bold text-white">
+                          Estancia &amp; Doble Altura
+                        </span>
+                      </div>
+                    </div>
+
+                    <div
+                      onClick={() => {
+                        setSelectedTourAreaId("cocina");
+                        setTourModalOpen(true);
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          setSelectedTourAreaId("cocina");
+                          setTourModalOpen(true);
+                        }
+                      }}
+                      className="relative rounded-2xl overflow-hidden h-48 shadow-xs group cursor-pointer"
+                    >
+                      <img
+                        src="https://images.unsplash.com/photo-1556911220-bff31c812dba?auto=format&fit=crop&w=800&q=80"
+                        alt="Cocina de autor con isla de cuarzo"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent flex items-end p-3">
+                        <span className="text-xs font-bold text-white">
+                          Cocina de Autor &amp; Cuarzo
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setTourModalOpen(true)}
+                      className="relative rounded-2xl overflow-hidden h-48 bg-[#0B1F3A] text-white p-5 flex flex-col justify-between text-left shadow-md hover:bg-[#122e55] transition-all cursor-pointer group"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-sky-400/20 border border-sky-300/30 flex items-center justify-center text-sky-300 group-hover:scale-110 transition-transform">
+                        <Compass className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-emerald-300">
+                          <Eye className="w-3 h-3" /> Inmersivo
+                        </span>
+                        <p className="text-sm font-extrabold leading-snug mt-1">
+                          Tour Virtual 360° Matterport 4K Activo
+                        </p>
+                        <p className="text-[11px] text-sky-200 mt-1 underline">
+                          Explorar recorrido digital →
+                        </p>
+                      </div>
+                    </button>
+                  </div>
+
+                  {/* Badges de AMENIDADES & PRIVILEGIOS RESIDENCIALES */}
+                  <div className="bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs space-y-3">
+                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
+                      AMENIDADES &amp; PRIVILEGIOS RESIDENCIALES
+                    </h3>
+                    <div className="flex flex-wrap gap-2.5">
+                      {ALL_AMENITIES.map((amenity) => (
+                        <span
+                          key={amenity}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-bold text-[#0B1F3A]"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          {amenity}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* MODIFICACIÓN 4: MAPA REAL INTERACTIVO DE GOOGLE MAPS EN "UBICACIÓN ESTRATÉGICA" */}
+                  <div className="bg-white rounded-3xl p-5 border border-slate-200/80 shadow-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <div className="flex items-center gap-2">
+                        <MapPin className="w-4 h-4 text-[#0B1F3A]" />
+                        <h3 className="text-xs sm:text-sm font-extrabold text-[#0B1F3A]">
+                          UBICACIÓN ESTRATÉGICA: {locationMeta.corridor}
+                        </h3>
+                      </div>
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        {activeProperty?.location}
+                      </span>
+                    </div>
+
+                    <div className="relative h-64 sm:h-72 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200">
+                      <iframe
+                        key={activeProperty?.id || mapQueryAddress}
+                        title={`Mapa interactivo de ${
+                          activeProperty?.title || "Propiedad SIGI"
+                        }`}
+                        src={googleMapsEmbedUrl}
+                        className="w-full h-full border-0"
+                        loading="lazy"
+                        referrerPolicy="no-referrer-when-downgrade"
+                        allowFullScreen
+                      />
+
+                      <a
+                        href={googleMapsExternalUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="absolute top-3 right-3 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#0B1F3A]/90 hover:bg-[#0B1F3A] text-white text-[11px] font-extrabold shadow-md backdrop-blur-xs transition-colors"
+                      >
+                        <span>Abrir en Google Maps ↗</span>
+                        <ExternalLink className="w-3 h-3 text-sky-300" />
+                      </a>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Columna Derecha (5 cols) */}
+                <div className="lg:col-span-5 space-y-5">
+                  {/* Card 1: DESGLOSE DE COMPATIBILIDAD conectado en vivo a /api/ai-match */}
+                  <div className="bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs space-y-5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0B1F3A]">
+                        DESGLOSE DE COMPATIBILIDAD
+                      </h3>
+                      <TrendingUp className="w-4 h-4 text-emerald-600" />
+                    </div>
+
+                    {/* Aro verde dinámico con el % de afinidad de la propiedad activa */}
+                    <div className="flex items-center gap-4 p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200/70">
+                      <div className="w-16 h-16 rounded-full border-4 border-emerald-500 flex items-center justify-center bg-white shrink-0 shadow-xs">
+                        <span className="text-lg font-extrabold text-emerald-700">
+                          {activeBreakdown.ai_match_score}%
+                        </span>
+                      </div>
+                      <div>
+                        <p className="text-sm font-extrabold text-[#0B1F3A]">
+                          {activeBreakdown.alignmentHeadline}
+                        </p>
+                        <p className="text-xs text-slate-600 mt-0.5">
+                          {activeBreakdown.alignmentDescription}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Barras de progreso dinámicas de los 3 criterios */}
+                    <div className="space-y-3.5 text-xs">
+                      <div>
+                        <div className="flex justify-between font-bold text-slate-700 mb-1">
+                          <span>Rango Presupuestal</span>
+                          <span className="text-emerald-700">
+                            {activeBreakdown.rangoPresupuestal}% OK
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                            style={{
+                              width: `${activeBreakdown.rangoPresupuestal}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between font-bold text-slate-700 mb-1">
+                          <span>Espacio para Home Office &amp; Fam</span>
+                          <span className="text-emerald-700">
+                            {activeBreakdown.espacioHomeOfficeFam}% OK
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                            style={{
+                              width: `${activeBreakdown.espacioHomeOfficeFam}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between font-bold text-slate-700 mb-1">
+                          <span>Distancia a Colegios Bilingües</span>
+                          <span className="text-emerald-700">
+                            {activeBreakdown.distanciaColegiosBilingues}% OK
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                            style={{
+                              width: `${activeBreakdown.distanciaColegiosBilingues}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card 2: ASESOR INMOBILIARIO CERTIFICADO (Sin datos precargados de Lic. Mariana De la Vega) */}
+                  <div className="bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs space-y-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-extrabold uppercase tracking-wider text-sky-700">
+                        ASESOR INMOBILIARIO CERTIFICADO
+                      </p>
+                      {assignedAdvisor && (
+                        <Link
+                          href={"/propietario/asesores" as never}
+                          onClick={() => {
+                            if (typeof window !== "undefined") {
+                              window.sessionStorage.setItem(
+                                "sigi_active_dashboard_role",
+                                "comprador"
+                              );
+                            }
+                          }}
+                          className="text-[11px] font-bold text-sky-700 hover:text-[#0B1F3A] hover:underline"
+                        >
+                          Cambiar asesor
+                        </Link>
+                      )}
+                    </div>
+
+                    {!assignedAdvisor ? (
+                      <div className="p-5 rounded-2xl bg-[#F4F7FB] border border-slate-200/90 text-center space-y-3">
+                        <div className="w-11 h-11 rounded-2xl bg-white border border-slate-200 text-[#0B1F3A] flex items-center justify-center mx-auto shadow-2xs">
+                          <UserCheck className="w-5 h-5 text-sky-700" />
+                        </div>
+                        <div className="space-y-1">
+                          <h4 className="text-sm font-extrabold text-[#0B1F3A]">
+                            Aún no tienes un asesor asignado
+                          </h4>
+                          <p className="text-xs text-slate-500 leading-relaxed">
+                            Selecciona a un especialista certificado de nuestra
+                            red nacional para agendar citas privadas o recibir
+                            atención personalizada.
+                          </p>
+                        </div>
+                        <div className="space-y-2 pt-1">
+                          <Link
+                            href={"/propietario/asesores" as never}
+                            onClick={() => {
+                              if (typeof window !== "undefined") {
+                                window.sessionStorage.setItem(
+                                  "sigi_active_dashboard_role",
+                                  "comprador"
+                                );
+                              }
+                            }}
+                            className="w-full py-2.5 px-4 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold inline-flex items-center justify-center gap-2 shadow-sm transition-colors"
+                          >
+                            <UserCheck className="w-4 h-4 text-sky-300" />
+                            <span>Seleccionar Asesor</span>
+                          </Link>
+
+                          <button
+                            type="button"
+                            onClick={handlePrintFichaPdf}
+                            className="w-full py-2 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-[#0B1F3A] text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Ficha PDF</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-3.5">
+                          {assignedAdvisor.avatarUrl ? (
+                            <img
+                              src={assignedAdvisor.avatarUrl}
+                              alt={assignedAdvisor.fullName}
+                              className="w-12 h-12 rounded-2xl object-cover border border-slate-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 rounded-2xl bg-[#0B1F3A] text-white font-extrabold text-sm flex items-center justify-center shrink-0">
+                              {assignedAdvisor.initials ||
+                                getInitials(assignedAdvisor.fullName)}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <h4 className="text-sm sm:text-base font-extrabold text-[#0B1F3A] truncate">
+                              {assignedAdvisor.fullName}
+                            </h4>
+                            <p className="text-xs text-slate-500 font-medium line-clamp-2">
+                              {assignedAdvisor.roleTitle}
+                            </p>
+                          </div>
+                        </div>
+
+                        {advisorToast && (
+                          <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-bold flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span>{advisorToast}</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setAdvisorToast(null)}
+                              className="text-emerald-700 font-bold hover:underline cursor-pointer"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="space-y-2.5 pt-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openScheduleModal(
+                                activeProperty?.title ||
+                                  "Residencia Cumbres de Juriquilla"
+                              )
+                            }
+                            className="w-full py-3 px-4 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          >
+                            <Calendar className="w-4 h-4" />
+                            <span>Agendar Cita Privada</span>
+                          </button>
+
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <button
+                              type="button"
+                              onClick={handleOpenWhatsApp}
+                              className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <MessageCircle className="w-4 h-4" />
+                              <span>WhatsApp</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handlePrintFichaPdf}
+                              className="py-2.5 px-3 rounded-xl border border-slate-200 hover:bg-slate-50 text-[#0B1F3A] text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <FileText className="w-4 h-4" />
+                              <span>Ficha PDF</span>
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Card 3: Azul Claro Alerta Automática de Match */}
+                  <div className="rounded-3xl bg-sky-50 border border-sky-200/80 p-6 space-y-3">
+                    <div className="flex items-center gap-2 text-[#0B1F3A]">
+                      <BellRing className="w-5 h-5 text-sky-600" />
+                      <h4 className="text-sm font-extrabold">
+                        Alerta Automática de Match
+                      </h4>
+                    </div>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Recibe notificación prioritaria vía WhatsApp cuando
+                      ingrese al MLS privado una propiedad con compatibilidad
+                      superior al 90%.
+                    </p>
+
+                    {alertActivated && alertConfirmationMsg && (
+                      <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-bold flex items-start gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        <span>{alertConfirmationMsg}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleRealtimeAlert()}
+                      className={`w-full py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
+                        alertActivated
+                          ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                          : "bg-[#0B1F3A] hover:bg-[#143159] text-white"
+                      }`}
+                    >
+                      {alertActivated
+                        ? "✓ Alerta en Tiempo Real Activada"
+                        : "Activar Alerta en Tiempo Real"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+            </>
+          )}
+        </div>
       </main>
 
-      {/* Modal de Confirmación Exitosa para Agendar Visita */}
-      {visitModalOpen && (
-        <div className="print:hidden fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border border-slate-200 space-y-5">
-            <div className="flex items-center justify-between">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
-                <CheckCircle2 className="w-6 h-6" />
+      {/* ====================================================================
+          MODIFICACIÓN 2.3: MODAL DE FILTROS AVANZADOS CON ESTILO SIGI
+          ==================================================================== */}
+      {filtersModalOpen && (
+        <div
+          className="print:hidden fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sigi-advanced-filters-title"
+        >
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 sm:p-7 shadow-2xl border border-slate-200 space-y-5 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-sky-700">
+                  MOTOR DE FILTRADO PATRIMONIAL • SIGI MATCH 4.8
+                </span>
+                <h3
+                  id="sigi-advanced-filters-title"
+                  className="text-lg sm:text-xl font-extrabold text-[#0B1F3A] mt-0.5"
+                >
+                  Filtros Avanzados de Propiedad
+                </h3>
               </div>
               <button
                 type="button"
-                onClick={() => setVisitModalOpen(false)}
+                onClick={() => setFiltersModalOpen(false)}
                 className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div>
-              <span className="text-[11px] font-extrabold uppercase tracking-wider text-emerald-700">
-                CONFIRMACIÓN OFICIAL SIGI
-              </span>
-              <h3 className="text-xl font-extrabold text-[#0B1F3A] mt-1">
-                Visita Privada Agendada con Éxito
-              </h3>
-              <p className="text-xs sm:text-sm text-slate-600 mt-1.5">
-                Tu recorrido personalizado para{" "}
-                <strong className="text-[#0B1F3A]">{visitPropertyTitle}</strong>{" "}
-                ha sido asignado a la <strong>Lic. Mariana De la Vega</strong>.
-              </p>
+            <div className="space-y-4 text-xs">
+              {/* Recámaras mínimas */}
+              <div className="space-y-1.5">
+                <label className="block font-extrabold text-[#0B1F3A] uppercase tracking-wider text-[11px]">
+                  Recámaras mínimas
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: "Cualquiera", value: 0 },
+                    { label: "1+", value: 1 },
+                    { label: "2+", value: 2 },
+                    { label: "3+", value: 3 },
+                    { label: "4+", value: 4 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => setDraftBedrooms(opt.value)}
+                      className={`px-3.5 py-2 rounded-xl font-extrabold transition-colors cursor-pointer border ${
+                        draftBedrooms === opt.value
+                          ? "bg-[#0B1F3A] text-white border-[#0B1F3A]"
+                          : "bg-[#F4F7FB] text-slate-700 border-slate-200 hover:border-[#0B1F3A]"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Baños mínimos */}
+              <div className="space-y-1.5">
+                <label className="block font-extrabold text-[#0B1F3A] uppercase tracking-wider text-[11px]">
+                  Baños mínimos
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: "Cualquiera", value: 0 },
+                    { label: "1+", value: 1 },
+                    { label: "2+", value: 2 },
+                    { label: "3+", value: 3 },
+                    { label: "4+", value: 4 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => setDraftBathrooms(opt.value)}
+                      className={`px-3.5 py-2 rounded-xl font-extrabold transition-colors cursor-pointer border ${
+                        draftBathrooms === opt.value
+                          ? "bg-[#0B1F3A] text-white border-[#0B1F3A]"
+                          : "bg-[#F4F7FB] text-slate-700 border-slate-200 hover:border-[#0B1F3A]"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Estacionamientos mínimos */}
+              <div className="space-y-1.5">
+                <label className="block font-extrabold text-[#0B1F3A] uppercase tracking-wider text-[11px]">
+                  Estacionamientos mínimos
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: "Cualquiera", value: 0 },
+                    { label: "1+", value: 1 },
+                    { label: "2+", value: 2 },
+                    { label: "3+", value: 3 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => setDraftParking(opt.value)}
+                      className={`px-3.5 py-2 rounded-xl font-extrabold transition-colors cursor-pointer border ${
+                        draftParking === opt.value
+                          ? "bg-[#0B1F3A] text-white border-[#0B1F3A]"
+                          : "bg-[#F4F7FB] text-slate-700 border-slate-200 hover:border-[#0B1F3A]"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Superficie mínima de construcción (m²) */}
+              <div className="space-y-1.5">
+                <label className="block font-extrabold text-[#0B1F3A] uppercase tracking-wider text-[11px]">
+                  Superficie mínima de construcción (m²)
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: "Sin mínimo", value: 0 },
+                    { label: "150 m²", value: 150 },
+                    { label: "250 m²", value: 250 },
+                    { label: "350 m²", value: 350 },
+                    { label: "450 m²", value: 450 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => setDraftConstructionM2(opt.value)}
+                      className={`px-3.5 py-2 rounded-xl font-extrabold transition-colors cursor-pointer border ${
+                        draftConstructionM2 === opt.value
+                          ? "bg-[#0B1F3A] text-white border-[#0B1F3A]"
+                          : "bg-[#F4F7FB] text-slate-700 border-slate-200 hover:border-[#0B1F3A]"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Amenidades requeridas (selección múltiple con pills) */}
+              <div className="space-y-1.5">
+                <label className="block font-extrabold text-[#0B1F3A] uppercase tracking-wider text-[11px]">
+                  Amenidades requeridas
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {ALL_AMENITIES.map((amenity) => {
+                    const selected = draftAmenities.includes(amenity);
+                    return (
+                      <button
+                        key={amenity}
+                        type="button"
+                        onClick={() => handleToggleDraftAmenity(amenity)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold transition-colors cursor-pointer border ${
+                          selected
+                            ? "bg-[#0B1F3A] text-white border-[#0B1F3A]"
+                            : "bg-[#F4F7FB] text-slate-700 border-slate-200 hover:border-[#0B1F3A]"
+                        }`}
+                      >
+                        <CheckCircle2
+                          className={`w-3.5 h-3.5 ${
+                            selected ? "text-[#10B981]" : "text-slate-400"
+                          }`}
+                        />
+                        <span>{amenity}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Solo Exclusivas SIGI (switch/checkbox) */}
+              <div className="p-3.5 rounded-2xl bg-[#F4F7FB] border border-slate-200/80 flex items-center justify-between gap-3">
+                <div>
+                  <p className="font-extrabold text-[#0B1F3A]">
+                    Solo Exclusivas SIGI
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Mostrar únicamente residencias con mandato exclusivo MLS
+                    Coldwell Banker.
+                  </p>
+                </div>
+                <label className="inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftOnlyExclusive}
+                    onChange={(e) => setDraftOnlyExclusive(e.target.checked)}
+                    className="w-4 h-4 accent-[#0B1F3A] rounded cursor-pointer"
+                  />
+                </label>
+              </div>
             </div>
 
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2 text-xs">
-              <div className="flex justify-between">
-                <span className="text-slate-500">Folio de Seguridad:</span>
-                <span className="font-bold text-[#0B1F3A]">
-                  {activeProperty?.folio || "MX-QRO-2025-089"}
+            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={handleClearAdvancedFiltersInModal}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-extrabold text-slate-600 hover:bg-slate-50 cursor-pointer"
+              >
+                Limpiar Filtros
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyAdvancedFilters}
+                className="px-5 py-2.5 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white text-xs font-extrabold shadow-md cursor-pointer"
+              >
+                Aplicar Filtros
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          MODIFICACIÓN 3: MINI-CALENDARIO INTERACTIVO Y HORARIOS (9:00 AM - 6:00 PM)
+          ==================================================================== */}
+      {visitModalOpen && (
+        <div
+          className="print:hidden fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="schedule-visit-modal-title"
+        >
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-7 shadow-2xl border border-slate-200 space-y-5 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-emerald-700">
+                  AGENDA PATRIMONIAL • COLDWELL BANKER SIGI
+                </span>
+                <h3
+                  id="schedule-visit-modal-title"
+                  className="text-xl font-extrabold text-[#0B1F3A] mt-0.5"
+                >
+                  Agendar Cita Privada
+                </h3>
+                <p className="text-xs text-slate-600 mt-1">
+                  Recorrido personalizado para{" "}
+                  <strong className="text-[#0B1F3A]">
+                    {visitPropertyTitle}
+                  </strong>{" "}
+                  (Folio{" "}
+                  <strong className="text-[#0B1F3A]">
+                    {activeProperty?.folio || "MX-QRO-2025-089"}
+                  </strong>
+                  ) con{" "}
+                  <strong>
+                    {assignedAdvisor?.fullName ||
+                      "Especialista Patrimonial Coldwell Banker"}
+                  </strong>
+                  .
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVisitModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Fecha y hora actual del sistema en vivo */}
+            <div className="p-3 rounded-2xl bg-[#F4F7FB] border border-slate-200/80 flex items-center gap-2.5 text-xs">
+              <Clock className="w-4 h-4 text-sky-700 shrink-0" />
+              <div>
+                <span className="font-extrabold text-[#0B1F3A]">
+                  Fecha y hora actual:{" "}
+                </span>
+                <span className="font-semibold text-slate-700 capitalize">
+                  {formattedLiveSystemDateTime}
                 </span>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Horario Preferente:</span>
-                <select
-                  value={visitDate}
-                  onChange={(e) => setVisitDate(e.target.value)}
-                  className="font-bold text-[#0B1F3A] bg-white border border-slate-200 rounded-lg px-2 py-1"
+            </div>
+
+            {/* Mini-calendario visual interactivo */}
+            <div className="p-4 rounded-2xl border border-slate-200/90 bg-white space-y-3">
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={handlePrevMonth}
+                  disabled={!canGoPrevMonth}
+                  aria-label="Mes anterior"
+                  className="w-8 h-8 rounded-xl border border-slate-200 flex items-center justify-center text-[#0B1F3A] hover:bg-slate-50 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  <option value="Mañana, 11:30 AM">Mañana, 11:30 AM</option>
-                  <option value="Jueves, 04:30 PM">Jueves, 04:30 PM</option>
-                  <option value="Sábado, 10:30 AM">Sábado, 10:30 AM</option>
-                </select>
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="text-xs sm:text-sm font-extrabold text-[#0B1F3A]">
+                  {MONTH_NAMES_ES[calendarMonth.month]} {calendarMonth.year}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleNextMonth}
+                  aria-label="Mes siguiente"
+                  className="w-8 h-8 rounded-xl border border-slate-200 flex items-center justify-center text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-extrabold text-slate-400">
+                {WEEKDAY_HEADERS_ES.map((dayName) => (
+                  <div key={dayName} className="py-1">
+                    {dayName}
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-7 gap-1">
+                {calendarGridDays.map((cell, idx) => {
+                  if (!cell.date || cell.dayNumber === null) {
+                    return <div key={`empty-${idx}`} className="h-9" />;
+                  }
+
+                  const cellDate = cell.date;
+                  const isPastDay = todayMidnight
+                    ? cellDate.getTime() < todayMidnight.getTime()
+                    : false;
+                  const isSelected = selectedVisitDate
+                    ? isSameDay(cellDate, selectedVisitDate)
+                    : false;
+                  const isToday = todayMidnight
+                    ? isSameDay(cellDate, todayMidnight)
+                    : false;
+
+                  return (
+                    <button
+                      key={cellDate.toISOString()}
+                      type="button"
+                      disabled={isPastDay}
+                      onClick={() => setSelectedVisitDate(cellDate)}
+                      className={`h-9 rounded-xl text-xs font-extrabold flex items-center justify-center transition-all ${
+                        isPastDay
+                          ? "text-slate-300 cursor-not-allowed line-through"
+                          : isSelected
+                          ? "bg-[#0B1F3A] text-white shadow-sm cursor-pointer"
+                          : isToday
+                          ? "bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 cursor-pointer"
+                          : "text-slate-700 hover:bg-[#F4F7FB] cursor-pointer"
+                      }`}
+                    >
+                      {cell.dayNumber}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={async () => {
-                await scheduleVisit({
-                  propertyFolio: activeProperty?.folio || "MX-QRO-2025-089",
-                  propertyTitle: visitPropertyTitle,
-                  scheduleLabel: visitDate,
-                });
-                setVisitModalOpen(false);
-                setAdvisorToast(
-                  `Visita privada confirmada y registrada en Supabase (public.visits) para ${visitPropertyTitle} (${visitDate}).`
-                );
-              }}
-              className="w-full py-3 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] text-white font-bold text-xs sm:text-sm cursor-pointer"
-            >
-              Entendido y Confirmar
-            </button>
+            {/* Selector de horario de 9:00 a.m. a 6:00 p.m. */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="block text-[11px] font-extrabold uppercase tracking-wider text-[#0B1F3A]">
+                  Horario Disponible (09:00 AM - 06:00 PM)
+                </label>
+                <span className="text-[11px] font-bold text-sky-700 capitalize">
+                  {formattedSelectedDateLong}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {VISIT_TIME_SLOTS.map((slot) => {
+                  const isPassed = isSlotPassedForDate(
+                    selectedVisitDate,
+                    slot.hour24,
+                    systemNow
+                  );
+                  const isSelected = effectiveSelectedTimeSlot === slot.label;
+
+                  return (
+                    <button
+                      key={slot.label}
+                      type="button"
+                      disabled={isPassed}
+                      onClick={() => setSelectedTimeSlot(slot.label)}
+                      className={`py-2 px-2.5 rounded-xl text-xs font-extrabold border transition-all ${
+                        isPassed
+                          ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed line-through"
+                          : isSelected
+                          ? "bg-[#0B1F3A] border-[#0B1F3A] text-white shadow-xs cursor-pointer"
+                          : "bg-[#F4F7FB] border-slate-200 text-[#0B1F3A] hover:border-[#0B1F3A] cursor-pointer"
+                      }`}
+                    >
+                      {slot.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {!effectiveSelectedTimeSlot && (
+                <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+                  Los horarios de atención de hoy (09:00 AM a 06:00 PM) ya
+                  concluyeron. Por favor selecciona otra fecha en el
+                  calendario.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setVisitModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-extrabold text-slate-600 hover:bg-slate-50 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={!effectiveSelectedTimeSlot || isConfirmingVisit}
+                onClick={() => void handleConfirmPrivateVisit()}
+                className="px-5 py-2.5 rounded-xl bg-[#0B1F3A] hover:bg-[#143159] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-extrabold shadow-md cursor-pointer"
+              >
+                {isConfirmingVisit
+                  ? "Guardando en Supabase..."
+                  : "Confirmar Cita Privada"}
+              </button>
+            </div>
           </div>
         </div>
       )}

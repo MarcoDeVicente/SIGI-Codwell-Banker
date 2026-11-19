@@ -80,12 +80,17 @@ export async function POST(request: Request) {
         .replace(/^-|-$/g, "")
         .slice(0, 48) || "propiedad";
 
-    const filePath = `properties/${Date.now()}-${baseName}.webp`;
+    const folderRaw = formData.get("folder");
+    const folder =
+      typeof folderRaw === "string" && folderRaw === "avatars"
+        ? "avatars"
+        : "properties";
+    const filePath = `${folder}/${Date.now()}-${baseName}.webp`;
+    const base64DataUrl = `data:image/webp;base64,${optimizedBuffer.toString(
+      "base64"
+    )}`;
 
     if (!isSupabaseConfigured) {
-      const base64DataUrl = `data:image/webp;base64,${optimizedBuffer.toString(
-        "base64"
-      )}`;
       return NextResponse.json({
         publicUrl: base64DataUrl,
         width: info.width,
@@ -102,12 +107,14 @@ export async function POST(request: Request) {
       });
 
     if (uploadError) {
-      return NextResponse.json(
-        {
-          error: `Error al subir la imagen al bucket ${BUCKET_NAME}: ${uploadError.message}`,
-        },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        publicUrl: base64DataUrl,
+        path: filePath,
+        width: info.width,
+        height: info.height,
+        size: info.size,
+        fallback: true,
+      });
     }
 
     const { data: publicUrlData } = supabase.storage

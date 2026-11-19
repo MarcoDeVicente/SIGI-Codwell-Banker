@@ -21,6 +21,12 @@ import {
 } from "lucide-react";
 import { registerSchema } from "@/lib/validations";
 import { useSigiStore, UserRole } from "@/lib/store";
+import SocialAuthModal, { SocialProvider } from "@/components/SocialAuthModal";
+
+const EXAMPLE_FULL_NAME = "Lic. Regina Luján";
+const EXAMPLE_EMAIL = "regina@patrimonio.mx";
+const EXAMPLE_PHONE = "55 8920 1200";
+const EXAMPLE_PASSWORD = "CB-Patrimonio-2025!";
 
 interface ProfileTabConfig {
   role: UserRole;
@@ -70,16 +76,17 @@ const PROFILE_CONFIGS: Record<UserRole, ProfileTabConfig> = {
 
 export default function RegistroPage() {
   const router = useRouter();
-  const { registerUser, loginOrSetRole } = useSigiStore();
+  const { registerUser } = useSigiStore();
 
   const [selectedRole, setSelectedRole] = useState<UserRole>("comprador");
-  const [fullName, setFullName] = useState("Lic. Regina Luján");
-  const [email, setEmail] = useState("regina@patrimonio.mx");
-  const [phone, setPhone] = useState("55 8920 1200");
-  const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState(EXAMPLE_FULL_NAME);
+  const [email, setEmail] = useState(EXAMPLE_EMAIL);
+  const [phone, setPhone] = useState(EXAMPLE_PHONE);
+  const [password, setPassword] = useState(EXAMPLE_PASSWORD);
   const [showPassword, setShowPassword] = useState(false);
   const [privacyAccepted, setPrivacyAccepted] = useState(true);
   const [turnstileVerified, setTurnstileVerified] = useState(true);
+  const [ssoProvider, setSsoProvider] = useState<SocialProvider | null>(null);
 
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formBannerError, setFormBannerError] = useState<string | null>(null);
@@ -171,19 +178,18 @@ export default function RegistroPage() {
       return;
     }
 
-    router.push("/sobre-nosotros" as never);
+    const targetRoute =
+      parsed.data.role === "asesor"
+        ? "/asesor"
+        : parsed.data.role === "propietario"
+        ? "/propietario"
+        : "/comprador";
+
+    router.push(targetRoute as never);
   };
 
-  const handleSSOLogin = (provider: "Google" | "Apple" | "LinkedIn") => {
-    loginOrSetRole({
-      role: selectedRole,
-      fullName: fullName.trim() || `Usuario ${provider} CB`,
-      email:
-        email.trim() ||
-        `${provider.toLowerCase()}.${selectedRole}@patrimonio.mx`,
-      phone: phone.trim() || "5589201200",
-    });
-    router.push("/sobre-nosotros" as never);
+  const handleSSOLogin = (provider: SocialProvider) => {
+    setSsoProvider(provider);
   };
 
   return (
@@ -213,15 +219,6 @@ export default function RegistroPage() {
               Servicios en: CDMX • Riviera Maya • Monterrey • Querétaro
             </span>
           </div>
-
-          {/* Enlace Conocer la Red CB */}
-          <Link
-            href={"/sobre-nosotros" as never}
-            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-[#0B1F3A] hover:text-sky-700 transition-colors"
-          >
-            <span>Conocer la Red CB</span>
-            <ArrowRight className="w-4 h-4" />
-          </Link>
         </div>
       </header>
 
@@ -320,6 +317,11 @@ export default function RegistroPage() {
                       id="reg-fullname"
                       type="text"
                       value={fullName}
+                      onFocus={() => {
+                        if (fullName === EXAMPLE_FULL_NAME) {
+                          setFullName("");
+                        }
+                      }}
                       onChange={(e) => {
                         const val = e.target.value;
                         setFullName(val);
@@ -354,6 +356,11 @@ export default function RegistroPage() {
                       id="reg-email"
                       type="email"
                       value={email}
+                      onFocus={() => {
+                        if (email === EXAMPLE_EMAIL) {
+                          setEmail("");
+                        }
+                      }}
                       onChange={(e) => {
                         const val = e.target.value;
                         setEmail(val);
@@ -397,6 +404,11 @@ export default function RegistroPage() {
                         id="reg-phone"
                         type="tel"
                         value={phone}
+                        onFocus={() => {
+                          if (phone === EXAMPLE_PHONE) {
+                            setPhone("");
+                          }
+                        }}
                         onChange={(e) => {
                           const val = e.target.value;
                           setPhone(val);
@@ -437,6 +449,11 @@ export default function RegistroPage() {
                       id="reg-password"
                       type={showPassword ? "text" : "password"}
                       value={password}
+                      onFocus={() => {
+                        if (password === EXAMPLE_PASSWORD) {
+                          setPassword("");
+                        }
+                      }}
                       onChange={(e) => {
                         const val = e.target.value;
                         setPassword(val);
@@ -595,21 +612,24 @@ export default function RegistroPage() {
             </div>
 
             {/* Pie de card */}
-            <div className="mt-6 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <p className="text-slate-600">
-                ¿Ya tienes una cuenta?{" "}
-                <Link
-                  href={"/login-academia" as never}
-                  className="font-bold text-[#0B1F3A] hover:underline"
-                >
-                  Iniciar Sesión
-                </Link>
-              </p>
+            <div className="mt-6 pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
               <Link
-                href={"/sobre-nosotros" as never}
-                className="font-bold text-sky-700 hover:text-[#0B1F3A] transition-colors"
+                href={"/login" as never}
+                className="text-slate-600 hover:text-[#0B1F3A] transition-colors"
               >
-                Sobre Nosotros
+                ¿Ya tienes una cuenta?{" "}
+                <span className="font-bold text-[#0B1F3A] hover:underline">
+                  Iniciar sesión
+                </span>
+              </Link>
+              <Link
+                href={"/login-academia" as never}
+                className="text-slate-600 hover:text-[#0B1F3A] transition-colors"
+              >
+                ¿Eres Asesor Coldwell Banker?{" "}
+                <span className="font-bold text-sky-700 hover:text-[#0B1F3A] hover:underline">
+                  Inicia Sesión aquí
+                </span>
               </Link>
             </div>
           </div>
@@ -688,6 +708,13 @@ export default function RegistroPage() {
           </p>
         </div>
       </footer>
+      <SocialAuthModal
+        isOpen={ssoProvider !== null}
+        provider={ssoProvider}
+        source="registro"
+        selectedRole={selectedRole}
+        onClose={() => setSsoProvider(null)}
+      />
     </div>
   );
 }
